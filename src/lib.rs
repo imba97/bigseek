@@ -175,4 +175,52 @@ mod tests {
         bytes[4] = 99; // 破坏 version
         assert!(load_index(bytes).is_err());
     }
+
+    /// 头部自洽但段内容恶意的索引：不能静默通过校验、更不能在分配时 abort
+    #[test]
+    fn rejects_malicious_headers() {
+        let (bytes, _) = build_index(&sample_docs());
+
+        // facets 计数 = u32::MAX：必须在 with_capacity 之前拒绝，
+        // 否则一个约 100 字节的文件会申请几十 GB（wasm 里是 trap，JS 拿不到 Err）
+        let facets_off = format::read_u32(&bytes, format::h::FACETS_OFF).unwrap() as usize;
+        let mut broken = bytes.clone();
+        broken[facets_off..facets_off + 5].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+        let err = match load_index(broken) {
+            Ok(_) => panic!("恶意 facets 计数不应通过加载"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("分面表计数越界"),
+            "应指出计数越界，实际：{err}"
+        );
+
+        // block_count 拉满：`block_count * 16` 在 wasm32 上会回绕，必须在乘法处拦下
+        let mut broken = bytes.clone();
+        format::patch_u32(&mut broken, format::h::BLOCK_COUNT, u32::MAX);
+        assert!(load_index(broken).is_err(), "blocks 段长度溢出应被拒绝");
+
+        // postings 段越界（旧实现读了 postings_off 却从不校验这一段）
+        let mut broken = bytes.clone();
+        format::patch_u32(&mut broken, format::h::POSTINGS_OFF, u32::MAX);
+        assert!(load_index(broken).is_err(), "postings 段越界应被拒绝");
+
+        // doc_count 与文档表长度不符
+        let mut broken = bytes.clone();
+        format::patch_u32(&mut broken, format::h::DOC_COUNT, u32::MAX);
+        assert!(load_index(broken).is_err(), "文档数异常应被拒绝");
+    }
+
+    #[test]
+    fn varint_rejects_overlong_encoding() {
+        // 5 字节编码但第 5 字节贡献了超过 4 位：旧实现直接左移丢高位，等于静默读错
+        let mut pos = 0;
+        assert_eq!(format::read_varint(&[0xFF, 0xFF, 0xFF, 0xFF, 0x7F], &mut pos), None);
+        // 正常的 5 字节编码仍然可读
+        let mut pos = 0;
+        assert_eq!(
+            format::read_varint(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F], &mut pos),
+            Some(u32::MAX)
+        );
+    }
 }

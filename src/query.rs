@@ -250,6 +250,7 @@ impl Index {
         let terms_len = read(h::TERMS_LEN)? as usize;
         let blocks_off = read(h::BLOCKS_OFF)? as usize;
         let postings_off = read(h::POSTINGS_OFF)? as usize;
+        let postings_len = read(h::POSTINGS_LEN)? as usize;
         let docs_off = read(h::DOCS_OFF)? as usize;
         let docs_len = read(h::DOCS_LEN)? as usize;
         let pool_off = read(h::POOL_OFF)? as usize;
@@ -259,13 +260,19 @@ impl Index {
         let block_count = read(h::BLOCK_COUNT)?;
 
         let len = data.len();
+        // 段长度一律用 checked 乘法：wasm32 的 usize 只有 32 位，
+        // 头部里的 block_count / doc_count 能让 `count * 16` 回绕，从而绕过越界校验
+        let blocks_len = (block_count as usize)
+            .checked_mul(BLOCK_ENTRY_SIZE)
+            .ok_or_else(|| format!("blocks 段长度溢出：block_count={block_count}"))?;
+        let docs_needed = (doc_count as usize)
+            .checked_mul(DOC_RECORD_SIZE)
+            .ok_or_else(|| format!("文档表长度溢出：doc_count={doc_count}"))?;
+
         for (name, off, size) in [
             ("terms", terms_off, terms_len),
-            (
-                "blocks",
-                blocks_off,
-                block_count as usize * BLOCK_ENTRY_SIZE,
-            ),
+            ("blocks", blocks_off, blocks_len),
+            ("postings", postings_off, postings_len),
             ("docs", docs_off, docs_len),
             ("pool", pool_off, 0usize),
             ("facets", facets_off, facets_len),
@@ -275,7 +282,7 @@ impl Index {
                 return Err(format!("{name} 段越界：off={off} size={size} len={len}"));
             }
         }
-        if docs_len < doc_count as usize * DOC_RECORD_SIZE {
+        if docs_len < docs_needed {
             return Err("文档表长度与文档数不一致".to_string());
         }
 
@@ -358,9 +365,10 @@ impl Index {
         }
         let base = self.blocks_off + block as usize * BLOCK_ENTRY_SIZE;
         Some((
-            format::read_u32(&self.data, base)? as usize + self.terms_off,
+            format::read_u32(&self.data, base)?.checked_add(self.terms_off as u32)? as usize,
             format::read_u32(&self.data, base + 4)?,
-            format::read_u32(&self.data, base + 8)? as usize + self.postings_off,
+            format::read_u32(&self.data, base + 8)?
+                .checked_add(self.postings_off as u32)? as usize,
         ))
     }
 
@@ -767,6 +775,15 @@ fn parse_facets(data: &[u8], off: usize, len: usize) -> Result<(FacetMap, FacetM
 
 fn parse_facet_map(section: &[u8], pos: &mut usize) -> Result<HashMap<String, Vec<u32>>, String> {
     let count = format::read_varint(section, pos).ok_or_else(|| "分面表读取失败".to_string())?;
+    // 计数来自文件、最多可到 u32::MAX；直接用它 with_capacity 会让一个约 100 字节的
+    // 构造文件申请几十 GB，分配失败直接 abort（wasm 里就是 trap，JS 侧连 Err 都拿不到）。
+    // 每个分面至少占 2 字节，段长天然是计数的上界。
+    if count as usize > section.len() {
+        return Err(format!(
+            "分面表计数越界：count={count} 段长={}",
+            section.len()
+        ));
+    }
     let mut map = HashMap::with_capacity(count as usize);
     for _ in 0..count {
         let name_len = format::read_varint(section, pos)
@@ -785,6 +802,13 @@ fn parse_facet_map(section: &[u8], pos: &mut usize) -> Result<HashMap<String, Ve
 
         let doc_count =
             format::read_varint(section, pos).ok_or_else(|| "分面文档数读取失败".to_string())?;
+        // 同上：每个 doc id 至少 1 字节
+        if doc_count as usize > section.len() {
+            return Err(format!(
+                "分面文档数越界：doc_count={doc_count} 段长={}",
+                section.len()
+            ));
+        }
         let mut ids = Vec::with_capacity(doc_count as usize);
         let mut last = 0u32;
         for _ in 0..doc_count {

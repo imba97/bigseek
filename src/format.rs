@@ -119,6 +119,11 @@ pub fn read_varint(data: &[u8], pos: &mut usize) -> Option<u32> {
     loop {
         let byte = *data.get(*pos)?;
         *pos += 1;
+        // 第 5 字节只允许贡献低 4 位（u32 共 32 位）：多出来的高位说明这是超长编码，
+        // 旧实现直接左移把它们丢掉了，于是「损坏的 varint」被静默读成一个偏小的值
+        if shift == 28 && byte & 0x70 != 0 {
+            return None;
+        }
         result |= u32::from(byte & 0x7F) << shift;
         if byte & 0x80 == 0 {
             return Some(result);
