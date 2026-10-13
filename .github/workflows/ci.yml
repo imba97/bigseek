@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 原生侧：格式、lint、单测、分词向量
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all --check
+
+      - name: Clippy（零警告）
+        run: cargo clippy --all-targets --features cli -- -D warnings
+
+      - name: 测试
+        run: cargo test --features cli
+
+  # wasm 侧：产物能编译、且能在真实 JS 运行时里查询
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 编译 wasm
+        run: wasm-pack build --target web --release --out-dir pkg --features wasm
+
+      - name: 生成冒烟索引
+        run: |
+          cargo run --release --features cli --bin build-index -- \
+            --input tests/fixtures/search-full.json \
+            --output target/smoke.idx \
+            --verify
+
+      - name: wasm 冒烟
+        run: node scripts/smoke-wasm.mjs target/smoke.idx
+
+      - name: 体积报告
+        run: |
+          echo "### wasm 体积" >> "$GITHUB_STEP_SUMMARY"
+          ls -l pkg/blog_search_bg.wasm | awk '{printf "- blog_search_bg.wasm: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+          ls -l pkg/blog_search.js | awk '{printf "- blog_search.js: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+          ls -l target/smoke.idx | awk '{printf "- 冒烟索引: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg
+          path: pkg/
+          if-no-files-found: error

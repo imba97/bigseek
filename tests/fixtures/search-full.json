@@ -1,0 +1,29 @@
+[
+  {
+    "id": "1",
+    "path": "/post/1",
+    "title": "性能优化实践",
+    "date": "2026-01-01",
+    "tags": ["性能", "Vue"],
+    "categories": ["前端"],
+    "text": "这篇文章讲浏览器性能优化，包括打包体积与缓存策略。"
+  },
+  {
+    "id": "2",
+    "path": "/post/2",
+    "title": "Rust 重写搜索",
+    "date": "2026-02-01",
+    "tags": ["Rust"],
+    "categories": ["前端"],
+    "text": "用 Rust 写一个 wasm 搜索库，替换 minisearch。性能提升主要来自分词。"
+  },
+  {
+    "id": "3",
+    "path": "/post/3",
+    "title": "Vue3 组件通信",
+    "date": "2025-12-01",
+    "tags": ["Vue"],
+    "categories": ["前端"],
+    "text": "props emit provide inject 四种方式。"
+  }
+]

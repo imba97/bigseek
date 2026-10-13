@@ -1,0 +1,62 @@
+[package]
+name = "blog-search"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Standalone full-text search index for the imba97 blog: compact binary format, CJK bigram tokenizer, native builder + WebAssembly runtime"
+license = "MIT"
+repository = "https://github.com/imba97/imba97-blog-search"
+readme = "README.md"
+keywords = ["search", "wasm", "cjk", "tokenizer", "blog"]
+categories = ["wasm", "text-processing"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# WebAssembly 运行期绑定（wasm-pack build --features wasm）
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+# 构建期 CLI：读 search-full.json 产出 search.idx
+cli = ["dep:serde", "dep:serde_json"]
+
+[dependencies]
+wasm-bindgen = { version = "0.2.100", optional = true }
+js-sys = { version = "0.3", optional = true }
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 本 crate 同时是 cdylib；Windows 上构建测试时会打印 dll.lib 生成信息，属噪声
+[lints.rust]
+linker_messages = "allow"
+
+[[bin]]
+name = "build-index"
+path = "src/bin/build-index.rs"
+required-features = ["cli"]
+
+[profile.release]
+# 体积优先：同一份 profile 同时服务 wasm（下载体积）与 native CLI（构建期一次性任务）
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Rust 1.87+ 默认会发出 bulk-memory / nontrapping-fptoint 指令，
+# 而 wasm-pack 自带的 binaryen 默认不开启这两项校验，直接跑 wasm-opt 会 Fatal。
+# 显式打开对应 feature（而不是关掉 wasm-opt），体积优化才能生效。
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+  "-Oz",
+  "--enable-bulk-memory",
+  "--enable-nontrapping-float-to-int",
+  "--enable-mutable-globals",
+]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false

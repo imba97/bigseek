@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "note": "Rust 与博客 TS 侧共用的分词向量。两侧实现必须逐字对齐；任何不一致都是 bug，不是'允许的差异'。",
+  "cases": [
+    {
+      "name": "纯中文 bigram",
+      "input": "性能优化",
+      "normalized": "性能优化",
+      "tokens": ["性能", "能优", "优化"]
+    },
+    {
+      "name": "长句 bigram",
+      "input": "最开始知道这个方法",
+      "normalized": "最开始知道这个方法",
+      "tokens": ["最开", "开始", "始知", "知道", "道这", "这个", "个方", "方法"]
+    },
+    {
+      "name": "全角逗号切断 bigram（不应产生 能优）",
+      "input": "性能，优化",
+      "normalized": "性能,优化",
+      "tokens": ["性能", "优化"]
+    },
+    {
+      "name": "全角空格",
+      "input": "性能　优化",
+      "normalized": "性能 优化",
+      "tokens": ["性能", "优化"]
+    },
+    {
+      "name": "全角 ASCII 归一化",
+      "input": "ｖｕｅ３ 测试",
+      "normalized": "vue3 测试",
+      "tokens": ["vue3", "测试"]
+    },
+    {
+      "name": "ASCII 大写折叠",
+      "input": "RUST 重写",
+      "normalized": "rust 重写",
+      "tokens": ["rust", "重写"]
+    },
+    {
+      "name": "中英混排：单个中文字符退化为 unigram",
+      "input": "用Rust写",
+      "normalized": "用rust写",
+      "tokens": ["用", "rust", "写"]
+    },
+    {
+      "name": "单字 CJK",
+      "input": "性",
+      "normalized": "性",
+      "tokens": ["性"]
+    },
+    {
+      "name": "标点分隔的单字序列",
+      "input": "看，性，能",
+      "normalized": "看,性,能",
+      "tokens": ["看", "性", "能"]
+    },
+    {
+      "name": "版本号按非字母数字切分",
+      "input": "vue3 7.2.0",
+      "normalized": "vue3 7.2.0",
+      "tokens": ["vue3", "7", "2", "0"]
+    },
+    {
+      "name": "下划线切分",
+      "input": "snake_case",
+      "normalized": "snake_case",
+      "tokens": ["snake", "case"]
+    },
+    {
+      "name": "emoji 不产生词条",
+      "input": "测试 🚀 完成",
+      "normalized": "测试 🚀 完成",
+      "tokens": ["测试", "完成"]
+    },
+    {
+      "name": "片假名走 bigram",
+      "input": "テスト",
+      "normalized": "テスト",
+      "tokens": ["テス", "スト"]
+    },
+    {
+      "name": "谚文走 bigram",
+      "input": "한글",
+      "normalized": "한글",
+      "tokens": ["한글"]
+    },
+    {
+      "name": "空串",
+      "input": "",
+      "normalized": "",
+      "tokens": []
+    },
+    {
+      "name": "纯标点",
+      "input": "！！",
+      "normalized": "!!",
+      "tokens": []
+    },
+    {
+      "name": "中英数字混排",
+      "input": "Vue3 + TypeScript 的类型体操",
+      "normalized": "vue3 + typescript 的类型体操",
+      "tokens": ["vue3", "typescript", "的类", "类型", "型体", "体操"]
+    }
+  ]
+}
