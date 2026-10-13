@@ -155,7 +155,7 @@ fn push_run<'a>(run: &'a str, is_cjk: bool, out: &mut Vec<&'a str>) {
 /// 去重且保持首次出现顺序；索引期与查询期都用（同一文档里同词只记一次 posting）。
 ///
 /// 接收借用切片，返回的仍是借用切片——不再为每个唯一 token 克隆一份 `String`。
-pub fn dedup_preserve_order<'a>(tokens: Vec<&'a str>) -> Vec<&'a str> {
+pub fn dedup_preserve_order(tokens: Vec<&str>) -> Vec<&str> {
     let mut seen = std::collections::HashSet::with_capacity(tokens.len());
     let mut out = Vec::with_capacity(tokens.len());
     for token in tokens {

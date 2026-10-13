@@ -215,7 +215,10 @@ mod tests {
     fn varint_rejects_overlong_encoding() {
         // 5 字节编码但第 5 字节贡献了超过 4 位：旧实现直接左移丢高位，等于静默读错
         let mut pos = 0;
-        assert_eq!(format::read_varint(&[0xFF, 0xFF, 0xFF, 0xFF, 0x7F], &mut pos), None);
+        assert_eq!(
+            format::read_varint(&[0xFF, 0xFF, 0xFF, 0xFF, 0x7F], &mut pos),
+            None
+        );
         // 正常的 5 字节编码仍然可读
         let mut pos = 0;
         assert_eq!(

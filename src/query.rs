@@ -202,7 +202,10 @@ impl DocBits {
     }
 
     fn count(&self) -> usize {
-        self.words.iter().map(|slot| slot.count_ones() as usize).sum()
+        self.words
+            .iter()
+            .map(|slot| slot.count_ones() as usize)
+            .sum()
     }
 
     fn is_empty(&self) -> bool {
@@ -367,8 +370,7 @@ impl Index {
         Some((
             format::read_u32(&self.data, base)?.checked_add(self.terms_off as u32)? as usize,
             format::read_u32(&self.data, base + 4)?,
-            format::read_u32(&self.data, base + 8)?
-                .checked_add(self.postings_off as u32)? as usize,
+            format::read_u32(&self.data, base + 8)?.checked_add(self.postings_off as u32)? as usize,
         ))
     }
 
