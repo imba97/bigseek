@@ -202,7 +202,11 @@ fn verify_recall(index_bytes: Vec<u8>, docs: &[SearchDocument], quiet: bool) -> 
         for ch in text.chars() {
             if let Some(left) = prev {
                 if is_cjk_like(left) && is_cjk_like(ch) {
-                    let entry = freq.entry((left, ch)).or_insert((doc_id, 0));
+                    // 首次出现就记 1，不要写成 0：`or_insert` 之后紧接着的
+                    // `entry.0 != doc_id` 对刚插入的条目为假，会把这一篇漏掉，
+                    // 于是出现于 N 篇的词条只记 N-1 次——小语料上整批候选被
+                    // VERIFY_MIN_DOC_FREQ 滤掉，自检直接报「抽样为空」。
+                    let entry = freq.entry((left, ch)).or_insert((doc_id, 1));
                     // 文档是逐篇扫的：同一篇里重复出现只算一次
                     if entry.0 != doc_id {
                         entry.0 = doc_id;
@@ -284,4 +288,51 @@ fn verify_recall(index_bytes: Vec<u8>, docs: &[SearchDocument], quiet: bool) -> 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(path: &str, title: &str, text: &str) -> SearchDocument {
+        SearchDocument {
+            path: path.to_string(),
+            title: title.to_string(),
+            date: "2026-01-01".to_string(),
+            tags: Vec::new(),
+            categories: Vec::new(),
+            text: text.to_string(),
+        }
+    }
+
+    /// 直方图必须按「出现于多少个**不同**文档」计数。
+    ///
+    /// 这条测试来自一次真实故障：首次出现被初始化成 0，于是出现于 N 篇的词条只记 N-1 次，
+    /// 4 篇的文章 fixture 上候选被全部滤掉，`--verify` 直接报「抽样为空」。
+    #[test]
+    fn histogram_counts_distinct_documents() {
+        let docs = vec![
+            doc("/a", "性能优化指南", "性能优化最开始的写法"),
+            doc("/b", "性能优化实践", "性能优化 又一次"),
+            doc("/c", "性能优化", "还是性能优化"),
+        ];
+        let (bytes, _) = build_index(&docs);
+
+        // 出现于 3 篇的词条必须留下候选：自检要能跑通，而不是「抽样为空」
+        verify_recall(bytes, &docs, true).expect("三篇共享 bigram 时应能完成自检");
+    }
+
+    /// 同一篇里重复出现只算一次，不能把词频当成文档数
+    #[test]
+    fn histogram_ignores_repeats_within_one_document() {
+        let docs = vec![
+            doc("/a", "孤独词条", "孤独词条 孤独词条 孤独词条 孤独词条"),
+            doc("/b", "另一篇", "完全无关的内容"),
+        ];
+        let (bytes, _) = build_index(&docs);
+
+        // 「孤独」只出现在 1 篇里，低于 VERIFY_MIN_DOC_FREQ，没有可抽样词
+        let err = verify_recall(bytes, &docs, true).unwrap_err();
+        assert!(err.contains("抽样为空"), "实际：{err}");
+    }
 }
