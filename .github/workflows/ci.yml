@@ -7,7 +7,8 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  # 需要往 release 传附件（wasm 包 + linux 原生 build-index + 契约向量）
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -91,9 +92,35 @@ jobs:
           ls -l pkg/bigseek.js | awk '{printf "- bigseek.js: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
           ls -l target/smoke.idx target/smoke-posts.idx | awk '{printf "- %s: %d bytes\n", $9, $5}' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload wasm package
+      # 索引生成器是 native 二进制，不在 wasm 包里；带上平台后缀发出，
+      # 这样博客构建端不需要任何 Rust 工具链。
+      - name: Prepare release assets
+        run: |
+          cp target/release/build-index build-index-linux-x64
+          ls -l build-index-linux-x64
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wasm-pkg
-          path: pkg/
+          name: bigseek-package
+          path: |
+            pkg/
+            build-index-linux-x64
           if-no-files-found: error
+
+      # tag 推送时创建/更新 release 并附带产物。
+      # 注意：这里是**正式** release（非 draft），因为博客构建要从 release 直接下载；
+      # draft 的 release 对未认证下载不可见，会让博客侧 404。
+      - name: Attach assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            pkg/bigseek_bg.wasm
+            pkg/bigseek.js
+            pkg/bigseek.d.ts
+            pkg/bigseek_bg.wasm.d.ts
+            build-index-linux-x64
+            testdata/tokenize-vectors.json
+            testdata/post-policy-vectors.json
