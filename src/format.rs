@@ -40,6 +40,8 @@ pub const BLOCK_ENTRY_SIZE: usize = 16;
 pub const DOC_RECORD_SIZE: usize = 48;
 /// facets 里 tags / categories 的分隔符
 pub const LIST_SEPARATOR: char = '\u{1f}';
+/// 同上，`str` 形式（`join` / `split` 需要）
+pub const LIST_SEPARATOR_STR: &str = "\u{1f}";
 
 /// flags 位定义
 pub mod flags {

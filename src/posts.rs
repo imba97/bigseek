@@ -76,14 +76,22 @@ pub fn load_posts(
         ..Default::default()
     };
     let mut entries: Vec<Entry> = Vec::new();
+    // 坏 frontmatter 不静默跳过（会改变索引内容），但也不在第一个文件上就中断——
+    // 否则多篇坏文件要跑多轮 CI 才能看全。这里收集完再一次性报出来。
+    let mut failures: Vec<String> = Vec::new();
 
     for file in &files {
         let raw =
             fs::read_to_string(file).map_err(|e| format!("读取 {} 失败：{e}", file.display()))?;
         let (front_matter, body) = split_front_matter(&raw);
 
-        let outcome = evaluate_frontmatter(front_matter.as_deref().unwrap_or(""))
-            .map_err(|e| format!("{} 的 frontmatter 处理失败：{e}", file.display()))?;
+        let outcome = match evaluate_frontmatter(front_matter.as_deref().unwrap_or("")) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                failures.push(format!("{}：{err}", file.display()));
+                continue;
+            }
+        };
 
         match outcome.reject_reason {
             Some(RejectReason::Draft) => {
@@ -130,6 +138,14 @@ pub fn load_posts(
             .cmp(&a.doc.date)
             .then_with(|| a.doc.path.cmp(&b.doc.path)),
     });
+
+    if !failures.is_empty() {
+        return Err(format!(
+            "{} 篇的 frontmatter 处理失败（索引内容不能静默改变）：\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        ));
+    }
 
     Ok((entries.into_iter().map(|e| e.doc).collect(), report))
 }

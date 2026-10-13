@@ -5,9 +5,6 @@ use std::collections::{BTreeMap, HashMap};
 use crate::format::{self, h, BLOCK_ENTRY_SIZE, BLOCK_SIZE, DOC_RECORD_SIZE, HEADER_SIZE};
 use crate::tokenize::{dedup_preserve_order, normalize, normalize_into, tokenize};
 
-/// tags / categories 在字符串池里的连接符（U+001F，Unit Separator）
-const LIST_SEPARATOR_STR: &str = "\u{1f}";
-
 /// 字段分隔符：`\n` 既不是 CJK 也不是 alphanumeric，用来阻断跨字段的伪 bigram
 const FIELD_SEPARATOR: char = '\n';
 
@@ -225,8 +222,8 @@ pub fn build_index(docs: &[SearchDocument]) -> (Vec<u8>, BuildStats) {
         let (title_off, title_len) = pool.intern(&doc.title);
         let (date_off, date_len) = pool.intern(&doc.date);
         let (text_off, text_len) = pool.intern(&doc.text);
-        let (tags_off, tags_len) = pool.intern(&doc.tags.join(LIST_SEPARATOR_STR));
-        let (cats_off, cats_len) = pool.intern(&doc.categories.join(LIST_SEPARATOR_STR));
+        let (tags_off, tags_len) = pool.intern(&doc.tags.join(format::LIST_SEPARATOR_STR));
+        let (cats_off, cats_len) = pool.intern(&doc.categories.join(format::LIST_SEPARATOR_STR));
         for value in [
             path_off, path_len, title_off, title_len, date_off, date_len, text_off, text_len,
             tags_off, tags_len, cats_off, cats_len,
