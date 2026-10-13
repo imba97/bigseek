@@ -1,13 +1,13 @@
 [package]
-name = "blog-search"
+name = "bigseek"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
-description = "Standalone full-text search index for the imba97 blog: compact binary format, CJK bigram tokenizer, native builder + WebAssembly runtime"
+description = "Bigram full-text search index with CJK support: compact binary format, native builder, WebAssembly runtime"
 license = "MIT"
-repository = "https://github.com/imba97/imba97-blog-search"
+repository = "https://github.com/imba97/bigseek"
 readme = "README.md"
-keywords = ["search", "wasm", "cjk", "tokenizer", "blog"]
+keywords = ["search", "wasm", "cjk", "bigram", "index"]
 categories = ["wasm", "text-processing"]
 
 [lib]

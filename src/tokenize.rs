@@ -50,7 +50,7 @@ pub fn is_cjk_like(ch: char) -> bool {
 /// 分词。输入应当已 `normalize`（本函数不再做大小写折叠，便于测试对齐）。
 ///
 /// ```
-/// use blog_search::tokenize::{normalize, tokenize};
+/// use bigseek::tokenize::{normalize, tokenize};
 /// let toks = tokenize(&normalize("性能优化 Vue3 指南"));
 /// assert_eq!(toks, ["性能", "能优", "优化", "vue3", "指南"]);
 /// ```

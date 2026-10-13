@@ -1,4 +1,4 @@
-//! # blog-search
+//! # bigseek
 //!
 //! `imba97-blog-vite` 站内搜索的独立检索引擎：**构建期用 native 产出紧凑二进制索引，运行期用 WebAssembly 查询**，
 //! 两边共用同一份分词、同一份倒排语义。
@@ -22,7 +22,7 @@
 //! 运行期（wasm）：
 //!
 //! ```js
-//! import init, { SearchIndex } from './blog_search.js'
+//! import init, { SearchIndex } from './bigseek.js'
 //! await init(wasmBytes)
 //! const index = new SearchIndex(idxBytes)
 //! const hits = index.query('性能优化', null, null, 40)

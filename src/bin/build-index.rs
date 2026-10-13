@@ -17,10 +17,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use blog_search::build::{build_index, SearchDocument};
-use blog_search::posts::load_posts;
-use blog_search::tokenize::{is_cjk_like, normalize};
-use blog_search::{load_index, SEARCH_LIMIT_MAX};
+use bigseek::build::{build_index, SearchDocument};
+use bigseek::posts::load_posts;
+use bigseek::tokenize::{is_cjk_like, normalize};
+use bigseek::{load_index, SEARCH_LIMIT_MAX};
 
 /// 召回自检阈值（百分比）
 const RECALL_THRESHOLD: f64 = 95.0;

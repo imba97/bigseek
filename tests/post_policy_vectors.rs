@@ -6,7 +6,7 @@
 //! 博客侧的 `pnpm run search:check-parity` 会读同一份向量校验 TS 实现，
 //! 两侧任何一方擅自改动「哪些文章可发布 / id 怎么算 / 标签怎么归一化」都会在这里或那边红灯。
 
-use blog_search::posts::{evaluate_frontmatter, RejectReason};
+use bigseek::posts::{evaluate_frontmatter, RejectReason};
 
 #[derive(serde::Deserialize)]
 struct Vectors {

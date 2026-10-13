@@ -13,8 +13,8 @@
 //! 度量口径与 `ai-docs/design/site-search.md` 完全一致：对每个真实中文词，
 //! 统计「语料里确实含该词的文档」中有多少被检索到（文档级召回）。
 
-use blog_search::tokenize::normalize;
-use blog_search::{load_index, SEARCH_LIMIT_MAX};
+use bigseek::tokenize::normalize;
+use bigseek::{load_index, SEARCH_LIMIT_MAX};
 
 #[derive(serde::Deserialize)]
 struct Doc {

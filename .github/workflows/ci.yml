@@ -77,8 +77,8 @@ jobs:
       - name: 体积报告
         run: |
           echo "### wasm 体积" >> "$GITHUB_STEP_SUMMARY"
-          ls -l pkg/blog_search_bg.wasm | awk '{printf "- blog_search_bg.wasm: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
-          ls -l pkg/blog_search.js | awk '{printf "- blog_search.js: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+          ls -l pkg/bigseek_bg.wasm | awk '{printf "- bigseek_bg.wasm: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+          ls -l pkg/bigseek.js | awk '{printf "- bigseek.js: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
           ls -l target/smoke.idx target/smoke-posts.idx | awk '{printf "- %s: %d bytes\n", $9, $5}' >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4

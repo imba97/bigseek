@@ -13,7 +13,7 @@
 //!
 //! 这份测试是「Rust 也能直接吃文章」这个能力的**准入条件**：只要它红着，就说明两条路径会产出不同的索引。
 
-use blog_search::posts::load_posts;
+use bigseek::posts::load_posts;
 
 #[derive(serde::Deserialize)]
 struct JsonDoc {

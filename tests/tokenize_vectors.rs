@@ -3,7 +3,7 @@
 //! 博客侧的 `pnpm run search:check-parity` 会读同一份向量校验 TS 实现，
 //! 两边任何一方擅自改动分词语义都会在这里或那边红灯。
 
-use blog_search::tokenize::{normalize, tokenize};
+use bigseek::tokenize::{normalize, tokenize};
 
 #[derive(serde::Deserialize)]
 struct Vectors {

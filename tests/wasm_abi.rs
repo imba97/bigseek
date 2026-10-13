@@ -16,8 +16,8 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use blog_search::build::{build_index, SearchDocument};
-use blog_search::wasm::SearchIndex;
+use bigseek::build::{build_index, SearchDocument};
+use bigseek::wasm::SearchIndex;
 use js_sys::{Array, Object, Reflect};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;

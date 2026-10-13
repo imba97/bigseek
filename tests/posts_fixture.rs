@@ -5,8 +5,8 @@
 //! fixture 里的 5 个文件覆盖：根 index 排除、日期排序、draft 过滤、id 非数字过滤、
 //! 表格与删除线扩展、原始 HTML 与实体保留。
 
-use blog_search::posts::{load_posts, parse_post_date_timestamp};
-use blog_search::tokenize::normalize;
+use bigseek::posts::{load_posts, parse_post_date_timestamp};
+use bigseek::tokenize::normalize;
 
 #[test]
 fn loads_fixture_posts_with_policy_and_order() {
@@ -90,8 +90,8 @@ fn extracted_text_is_searchable_by_bigram() {
     let (docs, _) = load_posts(dir).expect("直读 fixture 失败");
 
     // 索引是可检索的：整词落在句中的中文也要能命中（这正是当初的动机）
-    let (bytes, _) = blog_search::build_index(&docs);
-    let index = blog_search::load_index(bytes).expect("索引加载失败");
+    let (bytes, _) = bigseek::build_index(&docs);
+    let index = bigseek::load_index(bytes).expect("索引加载失败");
     let hits = index.query("性能", None, None, 10);
     assert_eq!(hits.len(), 1, "「性能」应命中 alpha：{hits:#?}");
     assert_eq!(hits[0].path, "/post/101");

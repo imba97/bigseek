@@ -1,10 +1,11 @@
-# blog-search
+# bigseek
 
-`imba97-blog-vite` 站内搜索的独立检索引擎：**构建期用 native CLI 产出紧凑二进制索引，运行期用 WebAssembly 查询**，
-两端共用同一份分词实现与同一份倒排语义。
+bigram 全文检索引擎：**构建期用 native CLI 产出紧凑二进制索引，运行期用 WebAssembly 查询**，
+两端共用同一份分词实现与同一份倒排语义。对中文（以及假名、谚文这类无空格分词文字）用 bigram，
+不需要分词词典也能拿到精确子串语义。
 
-本仓库是 `https://github.com/imba97/imba97-blog-vite` 的搜索依赖，由博客的构建流程拉取、编译，
-把产物放进 `public/search/`（wasm + glue + 索引）后随站点一起部署。
+最初为 [`imba97-blog-vite`](https://github.com/imba97/imba97-blog-vite) 的站内搜索而写，
+现在是一个独立可复用的库：输入是 markdown 文章目录或一份文档 JSON，产物是一个 wasm 模块加一个索引文件。
 
 ---
 
@@ -107,7 +108,7 @@ wasm-pack build --target web --release --out-dir pkg --no-default-features --fea
 ```
 
 ```js
-import init, { SearchIndex } from './blog_search.js'
+import init, { SearchIndex } from './bigseek.js'
 
 await init({ module_or_path: wasmBytes })   // 显式传字节，绕开 MIME / 路径问题
 const index = new SearchIndex(indexBytes)
@@ -117,7 +118,7 @@ index.query('性能优化', null, null, 40)
 //    tag / category 传 null 表示不限范围；limit 传 null 用默认 40
 ```
 
-产物（本语料）：`blog_search_bg.wasm` **75.4 KiB**、glue JS 12.4 KiB。
+产物（本语料）：`bigseek_bg.wasm` **75.4 KiB**、glue JS 12.4 KiB。
 
 > 是否带 `wasm` feature 是编译期开关：`cli` 与 `wasm` 互不依赖，wasm 产物里不会链接 `serde_json`。
 
@@ -214,7 +215,7 @@ tests/                 向量回归、fixture 直读、往返查询、wasm ABI �
 ```
 
 **依赖隔离**：`cli` 与 `wasm` 是互不依赖的 feature。`comrak` / `serde_yaml_ng` / `regex` 只挂在 `cli` 上，
-wasm 产物不会因为直读文章而变大（实测 `blog_search_bg.wasm` 恒为 75.4 KiB）。
+wasm 产物不会因为直读文章而变大（实测 `bigseek_bg.wasm` 恒为 75.4 KiB）。
 
 `cli` 被放进了 **default**，所以 `cargo build` / `cargo run` / `cargo test` 以及编辑器都开箱可用。
 代价只有一处：**wasm-pack 必须显式 `--no-default-features`**：
@@ -225,7 +226,7 @@ wasm-pack build --target web --release --out-dir pkg --no-default-features --fea
 
 忘了加也不会坏——实测 wasm 只大 5 KiB（LTO 会消掉未被引用的 comrak/regex），但构建会变慢。
 
-### 编辑器报 `unresolved import blog_search::posts`？
+### 编辑器报 `unresolved import bigseek::posts`？
 
 那是 rust-analyzer 按默认 feature 分析、而某个模块被 `#[cfg(feature = ...)]` 关掉了，
 **不是真的编译错误**（`cargo check` / `cargo test` 都是过的）。仓库自带 `.vscode/settings.json`：
