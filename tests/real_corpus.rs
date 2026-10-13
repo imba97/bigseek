@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! 真实语料回归（opt-in）：直接用博客产出的 `search-full.json` + `search.idx` 跑召回率。
 //!
 //! 通过环境变量启用，缺省时自动跳过（普通 `cargo test` 不依赖博客仓库）：

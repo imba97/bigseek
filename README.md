@@ -123,19 +123,18 @@ index.query('性能优化', null, null, 40)
 
 ## 测试
 
+**仓库里没有任何 JS 测试代码**——wasm 侧的 ABI 契约测试也是用 Rust 写的（`tests/wasm_abi.rs`）。
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test                                    # 含发布规则向量、fixture 直读、往返查询
+cargo test                                    # 原生：分词向量、发布规则向量、fixture 直读、往返查询
 
-# wasm 冒烟（真实 JS 运行时跑一遍查询）
+# wasm ABI 契约（纯 Rust 编写，跑在 wasm32 上；需要 Node 作为 wasm 宿主）
+wasm-pack test --node --no-default-features --features wasm
+
+# 产物能按部署方式加载
 wasm-pack build --target web --release --out-dir pkg --no-default-features --features wasm
-cargo run --release --bin build-index -- \
-  --input tests/fixtures/search-full.json --output target/smoke.idx
-node scripts/smoke-wasm.mjs target/smoke.idx
-
-# 性能基准
-node scripts/bench-wasm.mjs target/search.idx
 
 # 真实语料的差分对拍（opt-in，需要博客仓库）
 BLOG_POSTS_DIR=../imba97-blog-vite/posts \
@@ -148,8 +147,18 @@ BLOG_SEARCH_INDEX=../imba97-blog-vite/public/search/search.idx \
 cargo test --test real_corpus -- --nocapture
 ```
 
-> `cargo test` **不要加 `--release`**：`[profile.release]` 里为了 wasm 体积设了 `panic = "abort"`，
-> 它与测试目标要求的 unwind 不兼容。两个 opt-in 测试在 debug 下跑 144 篇也只要 0.2 s。
+`tests/wasm_abi.rs` 验证的是 native 上**执行不到**的那部分（wasm-bindgen 在 native 上是会 panic 的桩）：
+`query()` 是否返回 JS 数组、命中项的 key 是否恰好是约定的那 8 个、`tags` 是否为 JS 字符串数组、
+纯范围浏览的 `snippet` 是否为空、非法字节流是否抛可捕获的 JS 异常而不是 panic。
+
+两个注意点：
+
+- **`cargo test` 不要加 `--release`**：`[profile.release]` 里为了 wasm 体积设了 `panic = "abort"`，
+  与测试目标要求的 unwind 不兼容。两个 opt-in 测试在 debug 下跑 144 篇也只要 0.2 s。
+- **Windows + Node 24 下 `wasm-pack test --node` 会在测试跑完后崩**（runner 退出时触发 libuv 断言
+  `src/win/async.c`，测试本身全部通过但 exit code 为 1）。实测 Node 20.8.1 正常退出；
+  这是 Windows 专有代码路径的问题，Linux/CI（Node 22）不受影响。
+  本机规避：把 Node 20/22 的目录前置到 `PATH` 再跑。
 
 ### 本机网络提示
 
@@ -201,8 +210,7 @@ src/posts.rs           直读文章（frontmatter/YAML → 发布规则 → mark
 src/wasm.rs            wasm-bindgen 边界（手工拼 js_sys 对象，不引 serde）
 src/bin/build-index.rs 构建期 CLI（--posts-dir / --input）+ 召回自检
 testdata/              跨语言契约向量（分词、发布规则）
-tests/                 向量回归、fixture 直读、往返查询、真实语料对拍/召回（后两者 opt-in）
-scripts/               冒烟与基准（仅依赖 Node 内置能力）
+tests/                 向量回归、fixture 直读、往返查询、wasm ABI 契约、真实语料对拍/召回（后两者 opt-in）
 ```
 
 **依赖隔离**：`cli` 与 `wasm` 是互不依赖的 feature。`comrak` / `serde_yaml_ng` / `regex` 只挂在 `cli` 上，

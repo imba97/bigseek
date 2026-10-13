@@ -31,7 +31,7 @@ jobs:
       - name: 测试
         run: cargo test
 
-  # wasm 侧：产物能编译、且能在真实 JS 运行时里查询
+  # wasm 侧：产物能编译、ABI 契约成立（测试代码是 Rust，`wasm-pack test --node` 执行）
   wasm:
     runs-on: ubuntu-latest
     steps:
@@ -47,43 +47,39 @@ jobs:
         with:
           version: latest
 
+      # wasm-pack test --node 需要 Node 作为 wasm 宿主。
+      # 注意：Windows + Node 24 下 runner 会在测试跑完后崩（libuv 断言），
+      # 这里用的是 Linux + Node 22，不受影响。
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: wasm ABI 契约测试
+        run: wasm-pack test --node --no-default-features --features wasm
 
       - name: 编译 wasm
         run: wasm-pack build --target web --release --out-dir pkg --no-pack --no-default-features --features wasm
 
       - name: 生成冒烟索引（JSON 输入）
         run: |
-          cargo run --release --features cli --bin build-index -- \
+          cargo run --release --bin build-index -- \
             --input tests/fixtures/search-full.json \
             --output target/smoke.idx \
             --verify
 
       - name: 直读 fixture 文章（--posts-dir）
         run: |
-          cargo run --release --features cli --bin build-index -- \
+          cargo run --release --bin build-index -- \
             --posts-dir tests/fixtures/posts \
             --output target/smoke-posts.idx \
             --verify
-
-      - name: 双路径产物一致性
-        run: |
-          # fixture 的 posts 与 search-full.json 内容不同（前者多过滤逻辑），
-          # 因此这里只断言两条路径都能建出**可加载且召回自检通过**的索引；
-          # 真实语料的字节级对拍由博客构建里的哈希门禁负责。
-          ls -l target/smoke.idx target/smoke-posts.idx | awk '{printf "- %s: %d bytes\n", $9, $5}' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: wasm 冒烟
-        run: node scripts/smoke-wasm.mjs target/smoke.idx
 
       - name: 体积报告
         run: |
           echo "### wasm 体积" >> "$GITHUB_STEP_SUMMARY"
           ls -l pkg/blog_search_bg.wasm | awk '{printf "- blog_search_bg.wasm: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
           ls -l pkg/blog_search.js | awk '{printf "- blog_search.js: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
-          ls -l target/smoke.idx | awk '{printf "- 冒烟索引: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+          ls -l target/smoke.idx target/smoke-posts.idx | awk '{printf "- %s: %d bytes\n", $9, $5}' >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:

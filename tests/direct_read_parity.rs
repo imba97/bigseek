@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! 直读文章 vs 读 `search-full.json` 的**差分对拍**（opt-in）。
 //!
 //! ```bash

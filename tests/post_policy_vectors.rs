@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! 发布规则向量回归：与博客 TS 侧（`post-policy.ts` + `@11ty/gray-matter`）共用
 //! `testdata/post-policy-vectors.json`。
 //!

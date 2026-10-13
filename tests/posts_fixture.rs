@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! 直读文章目录的自包含回归（不依赖博客仓库）。
 //!
 //! fixture 里的 5 个文件覆盖：根 index 排除、日期排序、draft 过滤、id 非数字过滤、
