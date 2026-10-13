@@ -1,0 +1,114 @@
+name: Checks
+
+# The checks a release must pass first. This file has **no trigger of its own**: the only way
+# to run it is for release.yaml to call it. That is what makes "no release unless the checks
+# pass" a structural guarantee rather than something lined up by timing.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A workflow's own `env` is not passed to the workflow it calls, so this is declared here.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The native side: formatting, clippy, the test suite (tokenizer vectors, publish-rule
+  # vectors, fixture reads, round-trip queries) and the differential test that keeps the two
+  # extraction paths byte-identical.
+  test:
+    name: Native tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # This repository deliberately has no `rust-toolchain.toml`: `rust-version` in the
+      # manifest is the promise, and pinning a channel here would silently override it.
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--locked` throughout: a release is built from the committed lockfile or not at all.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint with clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+  # The wasm side: the artifact compiles, the ABI contract holds, and a real index can be built
+  # from both inputs. The package produced here is what release.yaml attaches to the release —
+  # one build, so the published bytes are the ones that were tested.
+  wasm:
+    name: Wasm package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      # `wasm-pack test --node` needs a Node runtime as the wasm host. Windows + Node 24
+      # crashes at exit in libuv; Linux + Node 22 is unaffected.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Test the wasm ABI contract
+        run: wasm-pack test --node --no-default-features --features wasm
+
+      - name: Build the wasm package
+        run: wasm-pack build --target web --release --out-dir pkg --no-pack --no-default-features --features wasm
+
+      - name: Build a smoke index from markdown posts
+        run: |
+          cargo run --release --locked --bin build-index -- \
+            --posts-dir tests/fixtures/posts \
+            --output target/smoke-posts.idx \
+            --verify
+
+      - name: Build a smoke index from JSON
+        run: |
+          cargo run --release --locked --bin build-index -- \
+            --input tests/fixtures/search-full.json \
+            --output target/smoke.idx \
+            --verify
+
+      # The index generator is a native binary: it is not part of the wasm package, and a
+      # build host that only consumes the artifacts should not need a Rust toolchain at all.
+      # The target suffix is what makes that possible.
+      - name: Prepare the release payload
+        run: cp target/release/build-index build-index-linux-x64
+
+      - name: Report artifact sizes
+        run: |
+          echo "### Wasm artifacts" >> "$GITHUB_STEP_SUMMARY"
+          ls -l pkg/bigseek_bg.wasm | awk '{printf "- bigseek_bg.wasm: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+          ls -l pkg/bigseek.js | awk '{printf "- bigseek.js: %.1f KiB\n", $5/1024}' >> "$GITHUB_STEP_SUMMARY"
+          ls -l target/smoke.idx target/smoke-posts.idx | awk '{printf "- %s: %d bytes\n", $9, $5}' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the release payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: bigseek-package
+          path: |
+            pkg/
+            build-index-linux-x64
+          if-no-files-found: error

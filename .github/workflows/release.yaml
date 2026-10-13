@@ -1,0 +1,130 @@
+name: Release
+
+# Publishing is not idempotent: a crate name and version pair can never be reused, and a
+# yanked version cannot be un-yanked. So this workflow is written to refuse rather than to
+# guess; `harbor publish` treats "the version is already on the registry" as done, which is
+# what makes a re-run able to finish a half-failed release.
+#
+# The checks live in ci.yaml, which this workflow calls: keeping them in one run is what makes
+# the order structural.
+on:
+  push:
+    # The one and only trigger: `v<major>.<minor>.<patch>`. Nothing else starts a run, so
+    # nothing else can reach the registry, and the shape of a release tag is enforced here
+    # rather than by a script that has to remember to check it.
+    tags: [ "v*.*.*" ]
+
+# Read-only by default; only the assets job asks for more, because it writes to the tag's
+# release.
+permissions:
+  contents: read
+
+jobs:
+  # Everything that can be checked without credentials. Calling the whole file means publish
+  # waits for every job inside it without listing them again here — a list would eventually
+  # miss one.
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yaml
+
+  # ---------------------------------------------------------------------------
+  # crates.io, driven by `harbor`: a single crate with no `[workspace]` table is an ordinary
+  # release for it, so there is no dependency order to respect here. What it brings is the
+  # checks that matter before an upload: the tag names the manifest version, the token is
+  # present and non-empty, and the publish plan is computable at all.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    needs: [ checks ]
+    runs-on: ubuntu-latest
+    # No `if:` needed: a tag push is the only way in, so reaching this job at all means a
+    # release was asked for, and `needs` means the checks have passed.
+    #
+    # No `environment:` either, on purpose: declaring one moves the secret into environment
+    # scope and requires that environment to exist before the first run. The token is read
+    # from Settings -> Secrets and variables -> Actions.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # No `rust-cache` here on purpose: this job has nothing worth caching and `cargo publish`
+      # verifies in seconds. Restoring a test job's cache is what once led a job like this to
+      # clean up a `target/package/` tree it had never created.
+
+      # Installed from its release archive instead of compiled: `cargo install` would build
+      # harbor and its whole dependency tree on every release, in every repository, for the
+      # same bytes.
+      #
+      # `--disable-strategies compile` is deliberate: with the compile fallback left on, a
+      # missing or broken archive would silently go back to compiling and this step would keep
+      # "working" while the release got slow again. With it, a release stops instead.
+      - uses: cargo-bins/cargo-binstall@v1.25.1
+
+      - name: Install the release tool
+        run: cargo binstall harbor --no-confirm --disable-strategies compile
+
+      # Two gates plus a plan in one command: the tag name matches the version in the manifest,
+      # the registry token exists and is non-empty, and the publish plan can be computed.
+      # Nothing is uploaded until all three hold.
+      #
+      # The token travels only through an environment variable, never as a command line
+      # argument, so it cannot reach the logs by cargo echoing the command line.
+      - name: Check the release before starting it
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo harbor check --plan "$GITHUB_REF_NAME"
+
+      # harbor publish will: retry while a dependency has not reached the index yet; treat "the
+      # version is already in the registry" as done (so a rerun can finish a half-failed
+      # release); and stop immediately on any other error rather than spending the retry budget
+      # on a failure that retrying cannot fix.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo harbor publish
+
+  # ---------------------------------------------------------------------------
+  # The prebuilt assets on the tag's GitHub release: the wasm package, the native index
+  # generator for Linux, and the two cross-language contract vectors. A consumer that only
+  # wants to query an index needs the wasm package; one that also wants to build an index
+  # needs the generator — neither should have to install Rust.
+  #
+  # The bytes come from the `checks` run, not from a rebuild here: what is attached is exactly
+  # what was tested. It does **not** wait for `publish`: producing the assets needs no
+  # registry, and a slow index should not hold a release up.
+  # ---------------------------------------------------------------------------
+  assets:
+    name: GitHub release assets
+    needs: [ checks ]
+    runs-on: ubuntu-latest
+    permissions:
+      # The release is written to, so this job needs more than the default.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: bigseek-package
+
+      # Attaching the assets also creates the release when the tag has none yet, which is why
+      # the notes are generated here rather than by a separate step.
+      - name: Attach the assets to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            pkg/bigseek_bg.wasm
+            pkg/bigseek.js
+            pkg/bigseek.d.ts
+            pkg/bigseek_bg.wasm.d.ts
+            build-index-linux-x64
+            testdata/tokenize-vectors.json
+            testdata/post-policy-vectors.json
