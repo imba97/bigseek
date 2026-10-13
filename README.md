@@ -1,252 +1,256 @@
 # bigseek
 
-bigram 全文检索引擎：**构建期用 native CLI 产出紧凑二进制索引，运行期用 WebAssembly 查询**，
-两端共用同一份分词实现与同一份倒排语义。对中文（以及假名、谚文这类无空格分词文字）用 bigram，
-不需要分词词典也能拿到精确子串语义。
+[中文](./README_CN.md) · **English**
 
-最初为 [`imba97-blog-vite`](https://github.com/imba97/imba97-blog-vite) 的站内搜索而写，
-现在是一个独立可复用的库：输入是 markdown 文章目录或一份文档 JSON，产物是一个 wasm 模块加一个索引文件。
+[![CI](https://img.shields.io/github/actions/workflow/status/imba97/bigseek/ci.yml?label=CI)](https://github.com/imba97/bigseek/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg)](https://blog.rust-lang.org/)
 
----
+Bigram full-text search in one binary index: build natively, query from WebAssembly.
 
-## 为什么需要它
+`bigseek` ships two entry points backed by a single implementation. A native CLI reads a
+markdown post directory or a document JSON and writes a compact binary index; a WebAssembly
+module loads that index without deserializing it and answers substring-accurate queries.
+Tokenization, scoring, and index semantics live in one crate, so the build-time and
+run-time views of the corpus cannot drift apart.
 
-博客原先用 [MiniSearch](https://github.com/lucaong/minisearch)，它的默认分词器按空白 + 标点切词，
-中文「一对标点之间的整句话」会成为一个词条。实测（50 个真实中文技术词、597 个「词 × 文档」对）：
+Chinese, Japanese kana, and Hangul are indexed as **bigrams**, which gives exact substring
+semantics without a segmentation dictionary. Latin and digits are indexed as whole
+alphanumeric runs.
 
-| 引擎 | 文档级召回 | 完全命中的词 | 冷启动建索引 |
+## Table of Contents
+
+- [Background](#background)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Index format](#index-format)
+- [Install](#install)
+- [Usage](#usage)
+- [API](#api)
+- [Determinism](#determinism)
+- [Known trade-offs](#known-trade-offs)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Background
+
+Whitespace-and-punctuation tokenizers treat a whole Chinese clause as a single term, so only
+terms that happen to start a sentence are reachable. Measured on a 144-post Chinese technical
+blog (50 real terms, 597 term × document pairs):
+
+| Engine | Document-level recall | Terms fully retrieved | Cold index build |
 | --- | --- | --- | --- |
-| MiniSearch 默认分词 | **39.7%**（237/597） | 0/48 | 79 ms |
-| MiniSearch + CJK bigram | 98.3%（587/597） | 47/48 | 300 ms |
-| **本库（bigram + OR 回退 + 原文校验）** | **100.0%**（597/597） | 48/48 | **1.2 ms**（零反序列化加载） |
+| Whitespace tokenizer ([MiniSearch](https://github.com/lucaong/minisearch) default) | **39.7%** (237/597) | 0/48 | 79 ms |
+| MiniSearch + CJK bigram | 98.3% (587/597) | 47/48 | 300 ms |
+| **bigseek** (bigram + OR fallback + raw-text verification) | **100.0%** (597/597) | 48/48 | **1.2 ms** (zero-deserialization load) |
 
-失败模式很具体：只有落在句子开头的词能被搜到，像 `性能`（4 篇）、`重写`（1 篇）这种整词落在句中的查询直接 0 结果。
-标题、标签、英文因为不会跨标点，所以「看起来能用」——这也是它长期没被发现的原因。
+The failure mode is narrow: a term in the middle of a sentence returns nothing, while titles,
+tags, and Latin words keep working — which is why it can go unnoticed for a long time.
 
-实测数据完整版见博客仓库的 [`ai-docs/design/site-search.md`](https://github.com/imba97/imba97-blog-vite/blob/main/ai-docs/design/site-search.md)。
+## Features
 
-## 设计要点
+- **One implementation, two runtimes** — the same tokenizer, scoring, and index semantics are
+  used by the native builder and the wasm reader. No build-time/runtime drift.
+- **CJK bigram tokenization** — `性能优化` → `性能` / `能优` / `优化`; single-character CJK queries
+  expand through the term dictionary, so `性` is searchable too.
+- **Two-pass retrieval** — AND first, then an OR fallback ranked by number of matched tokens.
+  This is what absorbs the cross-word bigram artefacts (`性能优化` also produces the nonexistent
+  `能优`, which a pure AND would turn into false negatives).
+- **Raw-text verification** — candidates are confirmed with a substring check on the original
+  field text, giving exact-substring semantics without a segmentation dictionary.
+- **Compact binary format** — front-coded dictionary, sparse block index, delta + varint
+  postings, fixed-size document records, deduplicated string pool, and facet (tag/category)
+  tables. 654 KiB for 144 posts / 24154 terms / 53246 postings.
+- **Zero-deserialization load** — loading validates the header and parses the facet tables
+  only; terms and postings are read lazily from the byte slice. ~1.2 ms for the index above.
+- **Quality gate built in** — `--verify` samples real terms from the corpus after building and
+  fails the build if document-level recall drops below 95%.
+- **No wasm-side JS** — the ABI contract is tested with `wasm-bindgen-test` in Rust.
 
-1. **一份实现，两处运行**。分词、打分、索引语义都在这个 crate 里：native CLI 建索引，wasm 查索引。
-   不存在「构建期一套、运行期一套」的漂移（旧方案里这是最容易出错的点）。
-2. **中英分词**：CJK / 假名 / 谚文走 **bigram**（`性能优化` → `性能`/`能优`/`优化`），拉丁按 `is_alphanumeric` 切。
-   单字符 CJK 查询走词典前缀展开，所以 `性` 也能搜到。
-3. **两段式检索**：先 AND（所有 token 都命中），为空再退化为 OR 并按命中 token 数排序。
-   这一步专门解决 bigram 的跨词边界问题——`性能优化` 会生成不存在的 `能优`，纯 AND 会误伤。
-4. **候选 + 原文子串校验**：候选集只有几十个，逐个用原文 `contains` 验证，拿到「精确子串」语义，
-   既不需要中文分词词典，也不会因 bigram 碎片而误报。
-5. **字段权重不建多份倒排**：只在文档级建倒排，`title`/`tags`/`categories` 的权重在查询期现算。
-   代价是几十次 `contains`，收益是词典体积不 ×4。
-6. **零反序列化**：加载时只校验头部、解析分面表（标签/分类），词条与 postings 按需从字节切片读。
-   654 KiB / 144 篇的索引加载 **1.2 ms**。
+## How it works
 
-## 索引格式（v1）
+1. **Tokenize.** Normalization is a per-character 1:1 mapping (fullwidth ASCII → halfwidth,
+   `U+3000` → space, ASCII uppercase → lowercase) and therefore never changes character
+   offsets. CJK/kana/Hangul runs become bigrams (single-character runs stay unigrams); Latin
+   runs are split on `char::is_alphanumeric`.
+2. **Build.** Document-level postings only — `title` / `tags` / `categories` / `text` are
+   concatenated with `\n` (which neither starts a bigram nor an alphanumeric run) and tokenized
+   once per document.
+3. **Locate.** The dictionary is front-coded in blocks of 16 terms with a sparse block index,
+   so a query binary-searches block first terms and then decodes forward within one block.
+4. **Retrieve.** Each token produces a document bit set (exact term plus a prefix expansion for
+   the last token and for single-character CJK). Sets are intersected, and the union is used
+   only when the intersection is empty.
+5. **Score.** Field weights (title 4 / tags 3 / categories 2 / text 1, plus 6 for an exact full
+   match) are computed at query time from the raw text, so no per-field posting lists are
+   stored.
+6. **Snippet.** The hit is located in the normalized field text and the character offset is
+   mapped back to the original text, which needs no position table thanks to the 1:1 mapping.
 
-```
+## Index format
+
+Format version 1. All integers are little-endian; variable-length integers are unsigned LEB128.
+
+```text
 header 80 B   magic "BSSI" | version | flags | doc_count | term_count | block_count
-              terms/blocks/postings/docs/pool/facets 各自的 off/len
-terms         按字典序前端编码的词条记录，每 16 条为一块
+              terms / blocks / postings / docs / pool / facets, each with off + len
+terms         front-coded term records in lexicographic order, 16 per block
               varint prefix_len | varint suffix_len | suffix | varint postings_len | varint doc_freq
-blocks        稀疏块索引（16 B/块）：first_term_off | term_count | postings_off | reserved
-              块内首词共享前缀置 0 → 可从任意块直接开始顺序解码
-postings      doc id 升序 delta + varint，按词条顺序连续存放
-docs          定长 48 B：path/title/date/text/tags/cats 的 (off, len)
-pool          所有原始字符串（tags/cats 用 U+001F 连接），相同串去重
-facets        varint 计数 + (名称, doc id 列表)
+blocks        sparse block index, 16 B per block:
+              first_term_off | term_count | postings_off | reserved
+              the first term of a block always has prefix_len 0, so decoding can start there
+postings      doc ids ascending, delta + varint, concatenated in term order
+docs          fixed 48 B records: (off, len) for path / title / date / text / tags / categories
+pool          raw strings in write order, duplicates deduplicated
+              tags and categories are joined with U+001F
+facets        varint count + (name, ascending delta-varint doc ids)*
 ```
 
-本语料实测体积：词典 180 KiB + postings 54 KiB + 文档表 7 KiB + 字符串池 388 KiB + 分面 3 KiB = **654 KiB**。
+## Install
 
-> ⚠️ **不要用「减小下载体积」当立项理由。** 654 KiB 比原来的 `search-full.json`（401 KiB）更大，
-> gzip 后也基本持平。本库的收益是**冷启动**（300 ms → 1.2 ms）、**内存**（JS 堆 14.5 MiB → wasm 线性内存）
-> 和**召回质量**，不是流量。
+The Rust crate is consumed by path or git dependency:
 
-## 用法
+```toml
+[dependencies]
+bigseek = { git = "https://github.com/imba97/bigseek" }
+```
 
-### 构建期（native CLI）
+The WebAssembly artifacts (`bigseek_bg.wasm`, `bigseek.js`, plus a prebuilt `build-index` and
+the contract vectors) are attached to every [GitHub release](https://github.com/imba97/bigseek/releases).
+There is no crates.io release yet.
 
-两种输入方式，二选一：
+## Usage
+
+### Build an index
 
 ```bash
-# A) 直读文章目录（推荐）——Rust 自己扫 posts/**/index.md、解析 frontmatter、按发布规则过滤、markdown 转纯文本
+# A) Read a markdown post directory (recommended): scans **/index.md, parses frontmatter,
+#    applies the publish rules, converts markdown to plain text.
 cargo run --release --bin build-index -- \
-  --posts-dir ../imba97-blog-vite/posts \
-  --output ../imba97-blog-vite/public/search/search.idx \
+  --posts-dir ./posts \
+  --output ./public/search/search.idx \
   --verify
 
-# B) 读博客 TS 侧产出的 search-full.json（回归基准 / 兼容旧流程）
+# B) Read a documents JSON (array of { path, title, date, tags, categories, text }).
 cargo run --release --bin build-index -- \
-  --input ../imba97-blog-vite/public/search-full.json \
-  --output ../imba97-blog-vite/public/search/search.idx \
+  --input ./documents.json \
+  --output ./public/search/search.idx \
   --verify
 ```
 
-两条路径在真实语料上产出**字节级完全相同**的索引（实测 144 篇、SHA256 一致），
-由 `tests/direct_read_parity.rs` 持续对拍。
+Both inputs produce a byte-identical index for the same corpus (verified by a differential test
+over 144 real posts, comparing SHA-256).
 
-直读模式的取舍：
-
-| | 直读 `--posts-dir` | 读 `--input` JSON |
+| | `--posts-dir` | `--input` JSON |
 | --- | --- | --- |
-| 发布规则真源 | Rust 复刻（由共享向量锁定） | TS `post-policy.ts` |
-| 构建期依赖 | 无（Rust 读文件系统） | 必须先跑一遍 TS 抽文 |
-| 索引内容上限 | 可扩到标题层级/代码语言/原文偏移 | 被 `stripHtml` 拍平后固定 |
-| 回归基准 | — | 仍是差分测试的基准 |
+| Source of truth for publish rules | Rust implementation, locked by shared vectors | the JSON producer |
+| Build-time dependencies | none (reads the filesystem) | a JSON export step must run first |
+| Ceiling on index content | can grow (heading levels, code languages, source offsets) | fixed by the flattening step |
 
-> ⚠️ 直读模式要求 Rust 侧与 TS 侧的抽取规则一致。**别只靠文档约束**：
-> `testdata/post-policy-vectors.json` 锁规则、`tests/direct_read_parity.rs` 对拍真实语料、
-> 博客构建里还有一道「两条路径产出索引哈希必须相同」的门禁（见下）。
-
-`--verify` 会在写完索引后立刻加载它，自动从语料抽样 ≥40 个中文词（取跨文档重复出现的 2 字 CJK 串，
-真实词会复现、跨词边界的碎片一般不会），做**文档级召回**自检，低于 95% 直接非 0 退出。
-这样每次博客构建都自带质量门禁，语料更新后依然有效。
-
-### 运行期（wasm）
+### Query from WebAssembly
 
 ```bash
-wasm-pack build --target web --release --out-dir pkg --no-default-features --features wasm
+wasm-pack build --target web --release --out-dir pkg \
+  --no-default-features --features wasm
 ```
 
 ```js
 import init, { SearchIndex } from './bigseek.js'
 
-await init({ module_or_path: wasmBytes })   // 显式传字节，绕开 MIME / 路径问题
+await init({ module_or_path: wasmBytes }) // pass bytes explicitly to avoid MIME/path issues
 const index = new SearchIndex(indexBytes)
 
 index.query('性能优化', null, null, 40)
 // → [{ path, title, date, tags, categories, snippet, score, exact }, ...]
-//    tag / category 传 null 表示不限范围；limit 传 null 用默认 40
+//   tag / category: null means "unscoped"; limit: null means the default of 40
 ```
 
-产物（本语料）：`bigseek_bg.wasm` **75.4 KiB**、glue JS 12.4 KiB。
+### Query from Rust
 
-> 是否带 `wasm` feature 是编译期开关：`cli` 与 `wasm` 互不依赖，wasm 产物里不会链接 `serde_json`。
+```rust
+use bigseek::{build_index, load_index, SearchDocument};
 
-## 测试
-
-**仓库里没有任何 JS 测试代码**——wasm 侧的 ABI 契约测试也是用 Rust 写的（`tests/wasm_abi.rs`）。
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test                                    # 原生：分词向量、发布规则向量、fixture 直读、往返查询
-
-# wasm ABI 契约（纯 Rust 编写，跑在 wasm32 上；需要 Node 作为 wasm 宿主）
-wasm-pack test --node --no-default-features --features wasm
-
-# 产物能按部署方式加载
-wasm-pack build --target web --release --out-dir pkg --no-default-features --features wasm
-
-# 真实语料的差分对拍（opt-in，需要博客仓库）
-BLOG_POSTS_DIR=../imba97-blog-vite/posts \
-BLOG_SEARCH_DOCS=../imba97-blog-vite/public/search-full.json \
-cargo test --test direct_read_parity -- --nocapture
-
-# 真实语料召回回归（opt-in）
-BLOG_SEARCH_DOCS=../imba97-blog-vite/public/search-full.json \
-BLOG_SEARCH_INDEX=../imba97-blog-vite/public/search/search.idx \
-cargo test --test real_corpus -- --nocapture
+let (bytes, stats) = build_index(&docs);
+let index = load_index(bytes)?;
+let hits = index.query("性能优化", None, None, 40);
 ```
 
-`tests/wasm_abi.rs` 验证的是 native 上**执行不到**的那部分（wasm-bindgen 在 native 上是会 panic 的桩）：
-`query()` 是否返回 JS 数组、命中项的 key 是否恰好是约定的那 8 个、`tags` 是否为 JS 字符串数组、
-纯范围浏览的 `snippet` 是否为空、非法字节流是否抛可捕获的 JS 异常而不是 panic。
+## API
 
-两个注意点：
+### CLI
 
-- **`cargo test` 不要加 `--release`**：`[profile.release]` 里为了 wasm 体积设了 `panic = "abort"`，
-  与测试目标要求的 unwind 不兼容。两个 opt-in 测试在 debug 下跑 144 篇也只要 0.2 s。
-- **Windows + Node 24 下 `wasm-pack test --node` 会在测试跑完后崩**（runner 退出时触发 libuv 断言
-  `src/win/async.c`，测试本身全部通过但 exit code 为 1）。实测 Node 20.8.1 正常退出；
-  这是 Windows 专有代码路径的问题，Linux/CI（Node 22）不受影响。
-  本机规避：把 Node 20/22 的目录前置到 `PATH` 再跑。
+| Flag | Description |
+| --- | --- |
+| `--posts-dir <dir>` | Read `**/index.md` recursively from a post directory |
+| `--input <file>` / `-i` | Read a documents JSON array |
+| `--output <file>` / `-o` | Write the binary index (required) |
+| `--verify` | Load the written index and run a document-level recall self-check (fails below 95%) |
+| `--quiet` / `-q` | Suppress progress output |
 
-### 本机网络提示
+### `SearchIndex` (wasm)
 
-如果 cargo 拉不到新依赖（企业代理 / 镜像环境），用环境变量让它走代理即可，不需要改全局配置：
+| Member | Description |
+| --- | --- |
+| `new(bytes)` | Parse the index; throws on a bad magic, an unsupported version, or corrupt sections |
+| `query(keywords, tag?, category?, limit?)` | Returns an array of hits; `tag` / `category` accept `null` for "unscoped" |
+| `docCount()` / `termCount()` | Number of indexed documents / distinct terms |
+| `facetCounts()` | `[tag count, category count]` |
+| `formatVersion()` | Index format version, so clients can reject a mismatch early |
 
-```bash
-# PowerShell
-$env:HTTPS_PROXY='http://127.0.0.1:7897'; cargo fetch
-# bash
-HTTPS_PROXY=http://127.0.0.1:7897 cargo fetch
-```
+### Cargo features
 
-## 分词与发布规则的一致性契约
+| Feature | Default | Contents |
+| --- | --- | --- |
+| `cli` | yes | Markdown/YAML/JSON handling and the `build-index` binary |
+| `wasm` | no | `wasm-bindgen` bindings |
 
-两份向量文件是**跨语言契约**，Rust 与博客 TS 侧读同一份：
+The two features are independent. `comrak`, `serde_yaml_ng`, and `regex` are only pulled in by
+`cli`, so a wasm build does not grow because of them. Because `cli` is a default feature,
+wasm builds must pass `--no-default-features` (a wasm build that forgets it still works — LTO
+drops the unused code, but the build gets slower).
 
-| 文件 | 锁定的语义 | Rust 校验 | 博客 TS 校验 |
-| --- | --- | --- | --- |
-| `testdata/tokenize-vectors.json` | 归一化 + 分词（bigram 边界、全角、大小写、单字、假名） | `tests/tokenize_vectors.rs` | `pnpm run search:check-parity` |
-| `testdata/post-policy-vectors.json` | 发布规则（draft 真值、date 判空、id 数字、标签归一化） | `tests/post_policy_vectors.rs` | `pnpm run search:check-parity` |
+## Determinism
 
-规则向量里刻意放了几个「JS 语义陷阱」用例，它们是最容易静默漂移的地方：
+Tokenizer and publish rules are locked by two cross-language vector files that both the Rust
+and the JavaScript implementations are tested against:
 
-- `draft: "false"`（字符串）在 JS 里是**真值** → 文章不可发布
-- `id: 7.0` → JS `String()` 得 `"7"`，不是 `"7.0"`
-- `tags: ["  a  ", "", "   ", b]` → trim 后丢弃空串，得 `["a","b"]`
-- `id: abc` / 缺 `date` / `date: ""` → 分别对应三种拒绝原因
+| File | Locks |
+| --- | --- |
+| `testdata/tokenize-vectors.json` | Normalization and tokenization (bigram boundaries, fullwidth forms, case folding, single characters, kana) |
+| `testdata/post-policy-vectors.json` | Publish rules (`draft` truthiness, empty dates, numeric ids, tag normalization) |
 
-归一化刻意只做**逐字符 1:1 替换**（全角 ASCII → 半角、`U+3000` → 空格、ASCII 大写 → 小写），不做完整 NFKC：
-一是省掉 unicode-normalization 的表体积，二是「归一化文本的字符下标 == 原文的字符下标」，
-摘要（snippet）可以直接把命中位置映射回原文，不需要额外位置表。若日后要支持繁体/组合字符，
-在 `normalize` 里补映射表并把 `FORMAT_VERSION` +1 即可。
+The vectors deliberately include JavaScript semantics traps, which are the places where an
+implementation silently drifts: `draft: "false"` is truthy in JavaScript, `id: 7.0` stringifies
+to `"7"`, and `tags: ["  a  ", "", "   ", b]` normalizes to `["a", "b"]`.
 
-### markdown 抽取的一个坑（实测踩过）
+Normalization is intentionally a 1:1 per-character mapping rather than full NFKC: it avoids the
+`unicode-normalization` tables and it keeps character offsets identical between the normalized
+and the original text, which is what makes snippets possible without a position table. Adding
+traditional/combining-character support means extending the mapping table and bumping
+`FORMAT_VERSION`.
 
-博客用的 `markdown-it` 是**默认 preset**，它自带 **table 与 strikethrough**（不是 CommonMark）。
-comrak 默认不开这两项，第一版移植因此有 4 篇文章文本不一致（表格管道符、`~~删除线~~`）。
-现在 `posts.rs` 里显式打开 table/strikethrough、关闭 tasklist/tagfilter/footnotes 等 markdown-it 没有的扩展，
-并由 `tests/direct_read_parity.rs` 守住。
+## Known trade-offs
 
-## 目录
+- **No stemming, synonyms, or pinyin.** Not needed for the target corpus; extending the
+  tokenizer is constrained by the vector tests.
+- **The 180 KiB term dictionary dominates the index size.** It is the necessary result of 24154
+  bigram terms. A real FST or bigram-only-for-body indexing would shrink it by an estimated
+  20–35%.
+- **Queries are slower than a JSON-backed engine** (0.37–1.11 ms versus ~0.1 ms) because of the
+  OR fallback and the raw-text verification. That buys recall and exactness; against a keystroke
+  budget the difference is not perceptible.
+- **No intra-process concurrency.** `Index` is read-only and has no interior mutability, so it
+  is `Send + Sync`; the wasm build is used single-threaded.
+- **`opt-level = 3`, not `"z"`.** Measured on the 144-post corpus: `"z"` gives a 74.7 KiB wasm
+  and a 0.509 ms query; `3` gives 87.1 KiB and 0.369 ms. Since the index itself is 654 KiB,
+  paying 12.4 KiB for ~30% faster queries was the better trade.
 
-```
-src/tokenize.rs        归一化 + bigram 分词（两端共用）
-src/format.rs          格式常量、varint、头部字段偏移
-src/build.rs           索引构建（BTreeMap 倒排 → 前端编码词典 → 各段拼装）
-src/query.rs           索引加载 + 检索（块二分 → 候选 → 校验 → 打分 → 摘要）
-src/posts.rs           直读文章（frontmatter/YAML → 发布规则 → markdown 转纯文本），仅 cli feature
-src/wasm.rs            wasm-bindgen 边界（手工拼 js_sys 对象，不引 serde）
-src/bin/build-index.rs 构建期 CLI（--posts-dir / --input）+ 召回自检
-testdata/              跨语言契约向量（分词、发布规则）
-tests/                 向量回归、fixture 直读、往返查询、wasm ABI 契约、真实语料对拍/召回（后两者 opt-in）
-```
+## Contributing
 
-**依赖隔离**：`cli` 与 `wasm` 是互不依赖的 feature。`comrak` / `serde_yaml_ng` / `regex` 只挂在 `cli` 上，
-wasm 产物不会因为直读文章而变大（实测 `bigseek_bg.wasm` 恒为 75.4 KiB）。
-
-`cli` 被放进了 **default**，所以 `cargo build` / `cargo run` / `cargo test` 以及编辑器都开箱可用。
-代价只有一处：**wasm-pack 必须显式 `--no-default-features`**：
-
-```bash
-wasm-pack build --target web --release --out-dir pkg --no-default-features --features wasm
-```
-
-忘了加也不会坏——实测 wasm 只大 5 KiB（LTO 会消掉未被引用的 comrak/regex），但构建会变慢。
-
-### 编辑器报 `unresolved import bigseek::posts`？
-
-那是 rust-analyzer 按默认 feature 分析、而某个模块被 `#[cfg(feature = ...)]` 关掉了，
-**不是真的编译错误**（`cargo check` / `cargo test` 都是过的）。仓库自带 `.vscode/settings.json`：
-
-```jsonc
-"rust-analyzer.cargo.features": ["cli", "wasm"],
-```
-
-一次性打开 `cli` 与 `wasm`，让 `posts` 与 `wasm` 两个模块都能解析。
-用其他编辑器请手动启用这两个 feature（或 `--all-features`）。
-
-## 已知取舍
-
-- **不做词干化 / 同义词 / 拼音**：当前语料不需要。要加的话在 `tokenize` 里扩，同样受向量测试约束。
-- **词典 180 KiB 是主要体积开销**：24154 个 bigram 词条的必然结果。若日后要压，
-  可以只对 `body` 用 bigram、`title`/`tags` 保持整词，或改用真正的 FST（预计再省 20~35%）。
-- **查询比 MiniSearch 慢一点**（0.06~2 ms vs 0.3 ms）：代价来自 OR 回退 + 原文校验，换来的是召回与精确性。
-  相对一次按键的帧预算，这个量级没有观感差异。
-- **单进程内不并发**：`Index` 只读、无内部可变状态，`Send + Sync` 天然满足；wasm 侧按单线程使用。
+Issues and pull requests are welcome. `cargo fmt --check`, `cargo clippy --all-targets
+--all-features -- -D warnings`, and `cargo test` must pass; the wasm ABI contract lives in
+`tests/wasm_abi.rs` and runs via `wasm-pack test --node`.
 
 ## License
 
-MIT
+[MIT](./LICENSE)
