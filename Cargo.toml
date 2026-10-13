@@ -54,8 +54,12 @@ path = "src/bin/build-index.rs"
 required-features = ["cli"]
 
 [profile.release]
-# 体积优先：同一份 profile 同时服务 wasm（下载体积）与 native CLI（构建期一次性任务）
-opt-level = "z"
+# 实测（144 篇 / 24154 词条语料，Node 里 2000 次查询）：
+#   opt-level = "z" → wasm 74.7 KiB，单字查询 1.639 ms，混合查询集 0.509 ms
+#   opt-level = 3   → wasm 87.1 KiB，单字查询 1.111 ms，混合查询集 0.369 ms
+# 查询快 27~32%，只多 12.4 KiB（索引本身 654 KiB，占比 1.9%）。按「每次击键都查询」
+# 的交互场景选速度；若体积重新成为瓶颈，改回 "z" 并同步更新这段注释即可。
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
