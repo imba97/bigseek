@@ -570,7 +570,7 @@ impl Index {
 
         // 每个 token 的候选位图（已按范围过滤）
         let mut sets: Vec<DocBits> = Vec::new();
-        for (i, token) in tokens.iter().enumerate() {
+        for (i, &token) in tokens.iter().enumerate() {
             let is_last = i + 1 == tokens.len();
             let mut bits = DocBits::new(self.doc_count);
             self.token_docs(token, is_last, &mut bits);
@@ -625,21 +625,21 @@ impl Index {
 
             let mut matched = 0u32;
             let mut score = 0u32;
-            for token in &tokens {
+            for &token in &tokens {
                 let mut token_matched = false;
-                if n_title.contains(token.as_str()) {
+                if n_title.contains(token) {
                     score += WEIGHT_TITLE;
                     token_matched = true;
                 }
-                if n_tags.contains(token.as_str()) {
+                if n_tags.contains(token) {
                     score += WEIGHT_TAG;
                     token_matched = true;
                 }
-                if n_cats.contains(token.as_str()) {
+                if n_cats.contains(token) {
                     score += WEIGHT_CATEGORY;
                     token_matched = true;
                 }
-                if n_text.contains(token.as_str()) {
+                if n_text.contains(token) {
                     score += WEIGHT_TEXT;
                     token_matched = true;
                 }
@@ -668,7 +668,7 @@ impl Index {
         }
         scored.sort_by(by_rank);
 
-        let first_token = tokens.first().map(String::as_str).unwrap_or("");
+        let first_token = tokens.first().copied().unwrap_or("");
         scored
             .into_iter()
             .filter_map(|(_, score, id, exact)| {

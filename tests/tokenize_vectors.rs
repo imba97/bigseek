@@ -36,7 +36,8 @@ fn tokenize_vectors_match_implementation() {
             continue;
         }
         let tokens = tokenize(&normalized);
-        if tokens != case.tokens {
+        let expected: Vec<&str> = case.tokens.iter().map(String::as_str).collect();
+        if tokens != expected {
             failures.push(format!(
                 "[{}] 分词不一致\n  输入: {:?}\n  期望: {:?}\n  实际: {:?}",
                 case.name, case.input, case.tokens, tokens

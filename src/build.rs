@@ -3,10 +3,48 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::format::{self, h, BLOCK_ENTRY_SIZE, BLOCK_SIZE, DOC_RECORD_SIZE, HEADER_SIZE};
-use crate::tokenize::{dedup_preserve_order, normalize, tokenize};
+use crate::tokenize::{dedup_preserve_order, normalize, normalize_into, tokenize};
 
 /// tags / categories 在字符串池里的连接符（U+001F，Unit Separator）
 const LIST_SEPARATOR_STR: &str = "\u{1f}";
+
+/// 字段分隔符：`\n` 既不是 CJK 也不是 alphanumeric，用来阻断跨字段的伪 bigram
+const FIELD_SEPARATOR: char = '\n';
+
+/// 把一篇文档拼成「索引用的归一化文本」，追加式（复用缓冲）。
+///
+/// 字段顺序（title / tags / categories / text）与分隔符是**索引语义的一部分**，不能改。
+/// 索引构建与 `--verify` 自检必须共用这一个函数：自检原先漏掉 categories 且字段顺序不同，
+/// 导致「分类没进索引」这类回归永远不被发现。
+pub fn push_indexed_text(doc: &SearchDocument, out: &mut String) {
+    out.clear();
+    normalize_into(&doc.title, out);
+    out.push(FIELD_SEPARATOR);
+    normalize_list_into(&doc.tags, out);
+    out.push(FIELD_SEPARATOR);
+    normalize_list_into(&doc.categories, out);
+    out.push(FIELD_SEPARATOR);
+    normalize_into(&doc.text, out);
+}
+
+/// [`push_indexed_text`] 的分配版（自检等一次性场景用）
+pub fn indexed_text(doc: &SearchDocument) -> String {
+    let mut out = String::new();
+    push_indexed_text(doc, &mut out);
+    out
+}
+
+/// 把一组标签/分类用空格连接并归一化后追加到缓冲。
+///
+/// 等价于 `normalize(&list.join(" "))`：归一化是逐字符映射，而空格映射到自身。
+fn normalize_list_into(list: &[String], out: &mut String) {
+    for (i, item) in list.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        normalize_into(item, out);
+    }
+}
 
 /// 一篇待索引的文档。字段与博客侧 `search-full.json` 的记录一一对应。
 #[derive(Debug, Clone, Default)]
@@ -104,19 +142,23 @@ pub fn build_index(docs: &[SearchDocument]) -> (Vec<u8>, BuildStats) {
     // ---- 1. 倒排表 ----------------------------------------------------------
     // 只用文档级 postings：字段权重在查询期用原文 `contains` 现算，
     // 这样不必为 title/tags/body 各建一份倒排（体积 ×4），而候选集本来就只有几十个。
-    let mut postings: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    //
+    // 用 HashMap 而不是 BTreeMap：插入省掉 O(log n) 次字符串比较（本语料 24.5 万次插入），
+    // 输出顺序仍由第 2 步「按词条字典序排序」保证，与 BTreeMap 的迭代顺序完全一致。
+    let mut postings: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut joined = String::new();
     for (i, doc) in docs.iter().enumerate() {
         let doc_id = i as u32;
-        // 字段间用 '\n' 连接：它不是 CJK、也不是 alphanumeric，能阻断跨字段的伪 bigram
-        let joined = format!(
-            "{}\n{}\n{}\n{}",
-            normalize(&doc.title),
-            normalize(&doc.tags.join(" ")),
-            normalize(&doc.categories.join(" ")),
-            normalize(&doc.text),
-        );
+        push_indexed_text(doc, &mut joined);
+
         for token in dedup_preserve_order(tokenize(&joined)) {
-            postings.entry(token).or_default().push(doc_id);
+            // 先查再插：命中已有词条时不产生 String 分配
+            match postings.get_mut(token) {
+                Some(ids) => ids.push(doc_id),
+                None => {
+                    postings.insert(token.to_string(), vec![doc_id]);
+                }
+            }
         }
     }
 
@@ -124,10 +166,16 @@ pub fn build_index(docs: &[SearchDocument]) -> (Vec<u8>, BuildStats) {
     let mut terms_blob: Vec<u8> = Vec::new();
     let mut postings_blob: Vec<u8> = Vec::new();
     let mut blocks: Vec<BlockEntry> = Vec::new();
-    let mut prev_term = String::new();
+    let mut prev_term: &str = "";
     let mut total_postings = 0usize;
 
-    for (i, (term, ids)) in postings.iter().enumerate() {
+    let mut sorted: Vec<(&str, &[u32])> = postings
+        .iter()
+        .map(|(term, ids)| (term.as_str(), ids.as_slice()))
+        .collect();
+    sorted.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+    for (i, (term, ids)) in sorted.into_iter().enumerate() {
         if i % BLOCK_SIZE == 0 {
             blocks.push(BlockEntry {
                 first_term_off: terms_blob.len() as u32,
@@ -135,31 +183,30 @@ pub fn build_index(docs: &[SearchDocument]) -> (Vec<u8>, BuildStats) {
                 postings_off: postings_blob.len() as u32,
             });
             // 块内首条词必须能独立解码，前缀共享清零
-            prev_term.clear();
+            prev_term = "";
         }
 
-        let mut delta = Vec::new();
+        // delta 直接写进 postings_blob：不再为每个词条新建一个临时 Vec 再拷贝
+        let delta_start = postings_blob.len();
         let mut last = 0u32;
         for &id in ids {
-            format::write_varint(&mut delta, id - last);
+            format::write_varint(&mut postings_blob, id - last);
             last = id;
         }
+        let delta_len = postings_blob.len() - delta_start;
         total_postings += ids.len();
 
-        let shared = common_prefix_len(&prev_term, term);
+        let shared = common_prefix_len(prev_term, term);
         format::write_varint(&mut terms_blob, shared as u32);
         format::write_varint(&mut terms_blob, (term.len() - shared) as u32);
         terms_blob.extend_from_slice(&term.as_bytes()[shared..]);
-        format::write_varint(&mut terms_blob, delta.len() as u32);
+        format::write_varint(&mut terms_blob, delta_len as u32);
         format::write_varint(&mut terms_blob, ids.len() as u32);
-
-        postings_blob.extend_from_slice(&delta);
 
         if let Some(block) = blocks.last_mut() {
             block.term_count += 1;
         }
-        prev_term.clear();
-        prev_term.push_str(term);
+        prev_term = term;
     }
 
     let mut blocks_blob = Vec::with_capacity(blocks.len() * BLOCK_ENTRY_SIZE);

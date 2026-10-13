@@ -22,10 +22,16 @@ use std::borrow::Cow;
 /// - ASCII `A..=Z` → 小写（只折 ASCII，避免 `İ` 这类展开成多个字符破坏 1:1）
 pub fn normalize(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
+    normalize_into(input, &mut out);
+    out
+}
+
+/// 归一化并**追加**到已有缓冲：构建期把多个字段拼进同一个缓冲时用，省掉中间 `String`。
+pub fn normalize_into(input: &str, out: &mut String) {
+    out.reserve(input.len());
     for ch in input.chars() {
         out.push(map_char(ch));
     }
-    out
 }
 
 /// 会被 `normalize` 改写的字符判定。纯中文/已小写 ASCII 语料里几乎恒为 false。
@@ -74,63 +80,87 @@ pub fn is_cjk_like(ch: char) -> bool {
 
 /// 分词。输入应当已 `normalize`（本函数不再做大小写折叠，便于测试对齐）。
 ///
+/// 返回的是**原文的借用切片**：bigram 本身就是相邻两字符的连续区间，
+/// 拉丁词也是连续区间，所以这里不需要任何堆分配（旧实现为每个 token 建一个 `String`，
+/// 索引期 24.5 万次、查询期每 token 一次）。
+///
 /// ```
 /// use bigseek::tokenize::{normalize, tokenize};
-/// let toks = tokenize(&normalize("性能优化 Vue3 指南"));
+/// let normalized = normalize("性能优化 Vue3 指南");
+/// let toks = tokenize(&normalized);
 /// assert_eq!(toks, ["性能", "能优", "优化", "vue3", "指南"]);
 /// ```
-pub fn tokenize(normalized: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut run: Vec<char> = Vec::new();
+pub fn tokenize(normalized: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut run_start: Option<usize> = None;
     let mut run_is_cjk = false;
 
-    fn flush(run: &mut Vec<char>, run_is_cjk: bool, out: &mut Vec<String>) {
-        if run.is_empty() {
-            return;
-        }
-        if run_is_cjk {
-            if run.len() == 1 {
-                out.push(run[0].to_string());
-            } else {
-                for w in run.windows(2) {
-                    out.push(w.iter().collect());
-                }
-            }
-        } else {
-            let mut cur = String::new();
-            for &c in run.iter() {
-                if c.is_alphanumeric() {
-                    cur.push(c);
-                } else if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
-            if !cur.is_empty() {
-                out.push(cur);
-            }
-        }
-        run.clear();
-    }
-
-    for ch in normalized.chars() {
+    for (idx, ch) in normalized.char_indices() {
         let cjk = is_cjk_like(ch);
-        if !run.is_empty() && cjk != run_is_cjk {
-            flush(&mut run, run_is_cjk, &mut out);
+        match run_start {
+            // 字符类别切换：结算上一段
+            Some(start) if cjk != run_is_cjk => {
+                push_run(&normalized[start..idx], run_is_cjk, &mut out);
+                run_start = Some(idx);
+            }
+            None => run_start = Some(idx),
+            _ => {}
         }
         run_is_cjk = cjk;
-        run.push(ch);
     }
-    flush(&mut run, run_is_cjk, &mut out);
+    if let Some(start) = run_start {
+        push_run(&normalized[start..], run_is_cjk, &mut out);
+    }
     out
 }
 
-/// 去重且保持首次出现顺序；索引期用（同一文档里同词只记一次 posting）。
-pub fn dedup_preserve_order(tokens: Vec<String>) -> Vec<String> {
+/// 结算一个同类别片段。CJK 段出 bigram（单字段出 unigram），拉丁段按 `is_alphanumeric` 切连续区间。
+fn push_run<'a>(run: &'a str, is_cjk: bool, out: &mut Vec<&'a str>) {
+    if run.is_empty() {
+        return;
+    }
+
+    if is_cjk {
+        if run.chars().count() == 1 {
+            out.push(run);
+            return;
+        }
+        // 相邻两字符的区间 = 前一字符起点 .. 后一字符终点（= 再下一个字符的起点或段末）
+        let mut iter = run.char_indices().peekable();
+        let mut prev: Option<usize> = None;
+        while let Some((idx, _)) = iter.next() {
+            if let Some(start) = prev {
+                let end = iter.peek().map_or(run.len(), |(next, _)| *next);
+                out.push(&run[start..end]);
+            }
+            prev = Some(idx);
+        }
+    } else {
+        let mut start: Option<usize> = None;
+        for (idx, ch) in run.char_indices() {
+            if ch.is_alphanumeric() {
+                if start.is_none() {
+                    start = Some(idx);
+                }
+            } else if let Some(from) = start.take() {
+                out.push(&run[from..idx]);
+            }
+        }
+        if let Some(from) = start {
+            out.push(&run[from..]);
+        }
+    }
+}
+
+/// 去重且保持首次出现顺序；索引期与查询期都用（同一文档里同词只记一次 posting）。
+///
+/// 接收借用切片，返回的仍是借用切片——不再为每个唯一 token 克隆一份 `String`。
+pub fn dedup_preserve_order<'a>(tokens: Vec<&'a str>) -> Vec<&'a str> {
     let mut seen = std::collections::HashSet::with_capacity(tokens.len());
     let mut out = Vec::with_capacity(tokens.len());
-    for t in tokens {
-        if seen.insert(t.clone()) {
-            out.push(t);
+    for token in tokens {
+        if seen.insert(token) {
+            out.push(token);
         }
     }
     out

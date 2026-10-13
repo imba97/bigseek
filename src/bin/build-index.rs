@@ -12,14 +12,14 @@
 //! `--verify` 会在写完索引后立刻加载它，从语料里自动抽样中文词做**文档级召回**自检，
 //! 低于阈值直接以非 0 退出——这样每次博客构建都会跑一次真实质量门禁。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use bigseek::build::{build_index, SearchDocument};
+use bigseek::build::{build_index, indexed_text, SearchDocument};
 use bigseek::posts::load_posts;
-use bigseek::tokenize::{is_cjk_like, normalize};
+use bigseek::tokenize::is_cjk_like;
 use bigseek::{load_index, SEARCH_LIMIT_MAX};
 
 /// 召回自检阈值（百分比）
@@ -174,7 +174,8 @@ fn run() -> Result<(), String> {
     }
 
     if args.verify {
-        verify_recall(&bytes, &docs, args.quiet)?;
+        // 索引字节直接移交自检（它只需要读一次），避免再复制一份 654 KiB
+        verify_recall(bytes, &docs, args.quiet)?;
     }
     Ok(())
 }
@@ -184,42 +185,48 @@ fn run() -> Result<(), String> {
 /// 抽样策略：取正文里所有长度为 `VERIFY_TERM_CHARS` 的 CJK 子串，按**被多少个不同文档包含**降序，
 /// 只保留出现于 ≥2 篇文档的候选（真实词会复现，跨词边界的碎片一般不会），再取前 N 个。
 /// 这样不需要人工维护词表，也能在语料更新后继续生效。
-fn verify_recall(index_bytes: &[u8], docs: &[SearchDocument], quiet: bool) -> Result<(), String> {
-    let index = load_index(index_bytes.to_vec()).map_err(|e| format!("自检加载索引失败：{e}"))?;
+fn verify_recall(index_bytes: Vec<u8>, docs: &[SearchDocument], quiet: bool) -> Result<(), String> {
+    let index = load_index(index_bytes).map_err(|e| format!("自检加载索引失败：{e}"))?;
 
-    let normalized: Vec<String> = docs
-        .iter()
-        .map(|d| {
-            format!(
-                "{}\n{}\n{}",
-                normalize(&d.title),
-                normalize(&d.text),
-                normalize(&d.tags.join(" "))
-            )
-        })
-        .collect();
+    // 与索引构建共用同一套「文档 → 归一化文本」：自检的 ground truth 不能比索引窄
+    let normalized: Vec<String> = docs.iter().map(indexed_text).collect();
 
-    // 候选词 → 出现的文档数
-    let mut freq: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    // 候选词 → (最后出现的 doc id, 出现于多少个不同文档)。
+    // key 用 (char, char) 而不是 String：词长固定为 2，于是约 50 万个窗口**零分配**
+    // （旧实现为每个窗口建一个 String 再插 BTreeSet，自检比建索引本身还慢）。
+    debug_assert_eq!(VERIFY_TERM_CHARS, 2, "直方图 key 假定抽样词长恰为 2");
+    let mut freq: HashMap<(char, char), (u32, u32)> = HashMap::new();
     for (doc_id, text) in normalized.iter().enumerate() {
-        let chars: Vec<char> = text.chars().collect();
-        for window in chars.windows(VERIFY_TERM_CHARS) {
-            if !window.iter().all(|c| is_cjk_like(*c)) {
-                continue;
+        let doc_id = doc_id as u32;
+        let mut prev: Option<char> = None;
+        for ch in text.chars() {
+            if let Some(left) = prev {
+                if is_cjk_like(left) && is_cjk_like(ch) {
+                    let entry = freq.entry((left, ch)).or_insert((doc_id, 0));
+                    // 文档是逐篇扫的：同一篇里重复出现只算一次
+                    if entry.0 != doc_id {
+                        entry.0 = doc_id;
+                        entry.1 += 1;
+                    }
+                }
             }
-            let term: String = window.iter().collect();
-            freq.entry(term).or_default().insert(doc_id);
+            prev = Some(ch);
         }
     }
 
-    let mut candidates: Vec<(String, usize)> = freq
+    let mut candidates: Vec<((char, char), u32)> = freq
         .into_iter()
-        .filter(|(_, ids)| ids.len() >= VERIFY_MIN_DOC_FREQ)
-        .map(|(term, ids)| (term, ids.len()))
+        .filter(|(_, (_, count))| *count as usize >= VERIFY_MIN_DOC_FREQ)
+        .map(|(pair, (_, count))| (pair, count))
         .collect();
-    // 出现文档数多的优先（更可能是真实词），同频按字典序保证确定性
-    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let sample: Vec<(String, usize)> = candidates.into_iter().take(VERIFY_SAMPLE_SIZE).collect();
+    // 出现文档数多的优先（更可能是真实词）；同频按 (char, char) 升序，
+    // 对 2 字符而言该顺序与 UTF-8 字节序一致，确定性不变
+    candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let sample: Vec<(String, usize)> = candidates
+        .into_iter()
+        .take(VERIFY_SAMPLE_SIZE)
+        .map(|((left, right), count)| (format!("{left}{right}"), count as usize))
+        .collect();
     if sample.is_empty() {
         return Err("自检抽样为空：语料太小或没有重复出现的中文词".to_string());
     }
