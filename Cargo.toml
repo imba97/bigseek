@@ -65,6 +65,11 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# docs.rs 默认只构建默认 feature（= cli），wasm 绑定会缺席；两边一起文档化。
+# `wasm` 在非 wasm 目标上也能编译（wasm-bindgen 的桩只会在运行时 panic），所以 all-features 可行。
+[package.metadata.docs.rs]
+all-features = true
+
 # Rust 1.87+ 默认会发出 bulk-memory / nontrapping-fptoint 指令，
 # 而 wasm-pack 自带的 binaryen 默认不开启这两项校验，直接跑 wasm-opt 会 Fatal。
 # 显式打开对应 feature（而不是关掉 wasm-opt），体积优化才能生效。

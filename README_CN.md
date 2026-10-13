@@ -2,9 +2,11 @@
 
 **中文** · [English](./README.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/imba97/bigseek/ci.yml?label=CI)](https://github.com/imba97/bigseek/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg)](https://blog.rust-lang.org/)
+[![crates.io](https://img.shields.io/crates/v/bigseek?style=flat-square&logo=rust)](https://crates.io/crates/bigseek)
+[![docs.rs](https://img.shields.io/docsrs/bigseek?style=flat-square&logo=docs.rs)](https://docs.rs/bigseek)
+[![CI](https://img.shields.io/github/actions/workflow/status/imba97/bigseek/release.yaml?label=Release&style=flat-square)](https://github.com/imba97/bigseek/actions/workflows/release.yaml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](./LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg?style=flat-square)](https://blog.rust-lang.org/)
 
 一个二进制索引里的 bigram 全文检索：构建期原生编译，运行期用 WebAssembly 查询。
 
@@ -94,15 +96,20 @@ facets        varint 计数 + (名称, doc id 升序 delta-varint)*
 
 ## 安装
 
-Rust crate 目前按路径或 git 依赖使用：
-
 ```toml
 [dependencies]
-bigseek = { git = "https://github.com/imba97/bigseek" }
+bigseek = "0.1"                                              # crates.io
+# bigseek = { git = "https://github.com/imba97/bigseek" }    # 或固定到某个提交
 ```
 
-WebAssembly 产物（`bigseek_bg.wasm`、`bigseek.js`，以及预编译的 `build-index` 与契约向量）
-挂在每个 [GitHub release](https://github.com/imba97/bigseek/releases) 上。尚未发布到 crates.io。
+`build-index` 二进制随 crate 一起发布，因此只需要索引生成器的构建环境不必克隆仓库：
+
+```bash
+cargo install bigseek --locked
+```
+
+WebAssembly 产物（`bigseek_bg.wasm`、`bigseek.js`，以及预编译的 Linux 版 `build-index` 与契约向量）
+挂在每个 [GitHub release](https://github.com/imba97/bigseek/releases) 上，供不想自己编译 wasm 的消费者使用。
 
 ## 用法
 

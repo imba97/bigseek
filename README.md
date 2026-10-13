@@ -2,9 +2,11 @@
 
 [中文](./README_CN.md) · **English**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/imba97/bigseek/ci.yml?label=CI)](https://github.com/imba97/bigseek/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg)](https://blog.rust-lang.org/)
+[![crates.io](https://img.shields.io/crates/v/bigseek?style=flat-square&logo=rust)](https://crates.io/crates/bigseek)
+[![docs.rs](https://img.shields.io/docsrs/bigseek?style=flat-square&logo=docs.rs)](https://docs.rs/bigseek)
+[![CI](https://img.shields.io/github/actions/workflow/status/imba97/bigseek/release.yaml?label=Release&style=flat-square)](https://github.com/imba97/bigseek/actions/workflows/release.yaml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](./LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg?style=flat-square)](https://blog.rust-lang.org/)
 
 Bigram full-text search in one binary index: build natively, query from WebAssembly.
 
@@ -108,16 +110,23 @@ facets        varint count + (name, ascending delta-varint doc ids)*
 
 ## Install
 
-The Rust crate is consumed by path or git dependency:
-
 ```toml
 [dependencies]
-bigseek = { git = "https://github.com/imba97/bigseek" }
+bigseek = "0.1"                                              # crates.io
+# bigseek = { git = "https://github.com/imba97/bigseek" }    # or pin to a revision
 ```
 
-The WebAssembly artifacts (`bigseek_bg.wasm`, `bigseek.js`, plus a prebuilt `build-index` and
-the contract vectors) are attached to every [GitHub release](https://github.com/imba97/bigseek/releases).
-There is no crates.io release yet.
+The `build-index` binary comes with the crate, so a build host can install the index generator
+without cloning anything:
+
+```bash
+cargo install bigseek --locked
+```
+
+The WebAssembly artifacts (`bigseek_bg.wasm`, `bigseek.js`, plus a prebuilt `build-index` for
+Linux and the contract vectors) are attached to every
+[GitHub release](https://github.com/imba97/bigseek/releases), for consumers that would rather
+not build the wasm themselves.
 
 ## Usage
 
