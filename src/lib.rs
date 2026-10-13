@@ -44,9 +44,15 @@ pub mod format;
 pub mod query;
 pub mod tokenize;
 
+// 直读文章（comrak / serde_yaml_ng / regex）挂在 `cli` 上，该 feature 在 default 里，
+// 所以 `cargo build` / `cargo test` / 编辑器默认就能解析到它。
 #[cfg(feature = "cli")]
 pub mod posts;
 
+// wasm 绑定挂在 `wasm` 上。**没有**放进 default（否则 wasm-pack 会连带编译 comrak 等依赖），
+// 因此 rust-analyzer 需要显式启用——本仓库的 `.vscode/settings.json` 已经配好
+// （rust-analyzer.cargo.features = ["cli", "wasm"]）。若在编辑器里看到本模块被 "configured out"，
+// 那是 feature 未启用，不是编译错误。
 #[cfg(feature = "wasm")]
 pub mod wasm;
 

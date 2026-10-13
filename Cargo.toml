@@ -14,11 +14,17 @@ categories = ["wasm", "text-processing"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
-# WebAssembly 运行期绑定（wasm-pack build --features wasm）
+# 默认带上 cli：让 `cargo build` / `cargo run` / `cargo test` 以及编辑器（rust-analyzer）
+# 开箱可用，不必记住 `--features cli`。
+#
+# ⚠️ 代价：wasm-pack 必须显式 `--no-default-features --features wasm`。
+#    忘了加 `--no-default-features` 也不会坏——comrak/serde_yaml_ng/regex 会被编进 wasm，
+#    实测只多 5 KiB（LTO 会消掉未被引用的代码），但构建会变慢。
+default = ["cli"]
+# WebAssembly 运行期绑定（wasm-pack build --no-default-features --features wasm）
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 # 构建期 CLI：读 search-full.json 或直接读 posts/ 产出 search.idx。
-# markdown 解析（comrak）与 YAML 解析只进这个 feature，**不会进 wasm 产物**。
+# markdown 解析（comrak）与 YAML 解析只在这个 feature 里，不该进 wasm 产物。
 cli = ["dep:serde", "dep:serde_json", "dep:comrak", "dep:serde_yaml_ng", "dep:regex"]
 
 [dependencies]

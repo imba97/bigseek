@@ -68,13 +68,13 @@ facets        varint 计数 + (名称, doc id 列表)
 
 ```bash
 # A) 直读文章目录（推荐）——Rust 自己扫 posts/**/index.md、解析 frontmatter、按发布规则过滤、markdown 转纯文本
-cargo run --release --features cli --bin build-index -- \
+cargo run --release --bin build-index -- \
   --posts-dir ../imba97-blog-vite/posts \
   --output ../imba97-blog-vite/public/search/search.idx \
   --verify
 
 # B) 读博客 TS 侧产出的 search-full.json（回归基准 / 兼容旧流程）
-cargo run --release --features cli --bin build-index -- \
+cargo run --release --bin build-index -- \
   --input ../imba97-blog-vite/public/search-full.json \
   --output ../imba97-blog-vite/public/search/search.idx \
   --verify
@@ -103,7 +103,7 @@ cargo run --release --features cli --bin build-index -- \
 ### 运行期（wasm）
 
 ```bash
-wasm-pack build --target web --release --out-dir pkg --features wasm
+wasm-pack build --target web --release --out-dir pkg --no-default-features --features wasm
 ```
 
 ```js
@@ -125,12 +125,12 @@ index.query('性能优化', null, null, 40)
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --features cli -- -D warnings
-cargo test --features cli                     # 含发布规则向量、fixture 直读、往返查询
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test                                    # 含发布规则向量、fixture 直读、往返查询
 
 # wasm 冒烟（真实 JS 运行时跑一遍查询）
-wasm-pack build --target web --release --out-dir pkg --features wasm
-cargo run --release --features cli --bin build-index -- \
+wasm-pack build --target web --release --out-dir pkg --no-default-features --features wasm
+cargo run --release --bin build-index -- \
   --input tests/fixtures/search-full.json --output target/smoke.idx
 node scripts/smoke-wasm.mjs target/smoke.idx
 
@@ -140,12 +140,12 @@ node scripts/bench-wasm.mjs target/search.idx
 # 真实语料的差分对拍（opt-in，需要博客仓库）
 BLOG_POSTS_DIR=../imba97-blog-vite/posts \
 BLOG_SEARCH_DOCS=../imba97-blog-vite/public/search-full.json \
-cargo test --features cli --test direct_read_parity -- --nocapture
+cargo test --test direct_read_parity -- --nocapture
 
 # 真实语料召回回归（opt-in）
 BLOG_SEARCH_DOCS=../imba97-blog-vite/public/search-full.json \
 BLOG_SEARCH_INDEX=../imba97-blog-vite/public/search/search.idx \
-cargo test --features cli --test real_corpus -- --nocapture
+cargo test --test real_corpus -- --nocapture
 ```
 
 > `cargo test` **不要加 `--release`**：`[profile.release]` 里为了 wasm 体积设了 `panic = "abort"`，
@@ -205,8 +205,29 @@ tests/                 向量回归、fixture 直读、往返查询、真实语�
 scripts/               冒烟与基准（仅依赖 Node 内置能力）
 ```
 
-**依赖隔离**：`cli` 与 `wasm` 是互不依赖的 feature。`comrak` / `serde_yaml_ng` / `regex` 只进 native CLI，
+**依赖隔离**：`cli` 与 `wasm` 是互不依赖的 feature。`comrak` / `serde_yaml_ng` / `regex` 只挂在 `cli` 上，
 wasm 产物不会因为直读文章而变大（实测 `blog_search_bg.wasm` 恒为 75.4 KiB）。
+
+`cli` 被放进了 **default**，所以 `cargo build` / `cargo run` / `cargo test` 以及编辑器都开箱可用。
+代价只有一处：**wasm-pack 必须显式 `--no-default-features`**：
+
+```bash
+wasm-pack build --target web --release --out-dir pkg --no-default-features --features wasm
+```
+
+忘了加也不会坏——实测 wasm 只大 5 KiB（LTO 会消掉未被引用的 comrak/regex），但构建会变慢。
+
+### 编辑器报 `unresolved import blog_search::posts`？
+
+那是 rust-analyzer 按默认 feature 分析、而某个模块被 `#[cfg(feature = ...)]` 关掉了，
+**不是真的编译错误**（`cargo check` / `cargo test` 都是过的）。仓库自带 `.vscode/settings.json`：
+
+```jsonc
+"rust-analyzer.cargo.features": ["cli", "wasm"],
+```
+
+一次性打开 `cli` 与 `wasm`，让 `posts` 与 `wasm` 两个模块都能解析。
+用其他编辑器请手动启用这两个 feature（或 `--all-features`）。
 
 ## 已知取舍
 

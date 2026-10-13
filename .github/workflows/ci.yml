@@ -25,11 +25,11 @@ jobs:
       - name: 格式检查
         run: cargo fmt --all --check
 
-      - name: Clippy（零警告）
-        run: cargo clippy --all-targets --features cli -- -D warnings
+      - name: Clippy（零警告，含 wasm feature）
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: 测试
-        run: cargo test --features cli
+        run: cargo test
 
   # wasm 侧：产物能编译、且能在真实 JS 运行时里查询
   wasm:
@@ -52,7 +52,7 @@ jobs:
           node-version: 22
 
       - name: 编译 wasm
-        run: wasm-pack build --target web --release --out-dir pkg --features wasm
+        run: wasm-pack build --target web --release --out-dir pkg --no-pack --no-default-features --features wasm
 
       - name: 生成冒烟索引（JSON 输入）
         run: |

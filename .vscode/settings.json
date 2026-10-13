@@ -1,0 +1,6 @@
+{
+  "//": "让 rust-analyzer 同时启用 cli 与 wasm feature，否则 posts/ 与 wasm 模块会显示 unresolved import（只是 feature 未启用，不是真错误）",
+  "rust-analyzer.cargo.features": ["cli", "wasm"],
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.check.command": "clippy"
+}
