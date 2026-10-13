@@ -1,11 +1,12 @@
 //! 索引读取与查询（运行期）。**零反序列化**：只校验头 + 解析分面表，词条与 postings 按需从字节切片读。
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use crate::format::{
     self, d as df, h, BLOCK_ENTRY_SIZE, DOC_RECORD_SIZE, HEADER_SIZE, LIST_SEPARATOR,
 };
-use crate::tokenize::{dedup_preserve_order, is_cjk_like, normalize, tokenize};
+use crate::tokenize::{dedup_preserve_order, is_cjk_like, normalize, normalize_cow, tokenize};
 
 pub const SEARCH_LIMIT_DEFAULT: usize = 40;
 pub const SEARCH_LIMIT_MAX: usize = 200;
@@ -88,6 +89,10 @@ fn split_list(raw: &str) -> Vec<String> {
 }
 
 /// 顺序解码块内的前端编码词条。
+///
+/// 词条缓冲在整个游标生命周期内复用：`advance()` 只做 `truncate + push_str`，
+/// 不再为每个词条新建 `String` 并整词克隆。词典扫描是查询热路径
+/// （前缀展开一轮可达数千词条），这里的分配次数直接决定查询延迟。
 struct TermCursor<'a> {
     data: &'a [u8],
     end: usize,
@@ -105,28 +110,119 @@ impl<'a> TermCursor<'a> {
         }
     }
 
-    /// 返回（词条, postings 字节长度, doc_freq）并前进游标。块内首条记录共享前缀为 0。
-    fn next(&mut self) -> Option<(String, u32, u32)> {
+    /// 前进到下一条记录，返回（postings 字节长度, doc_freq）；成功后 `term()` 给出词条。
+    ///
+    /// 拆成 `advance` + `term` 两步而不是返回 `String`，是为了让借用在这里结束——
+    /// 调用方拿到比较结果（`Ordering`/`bool`）后即可继续前进，无需复制词条。
+    fn advance(&mut self) -> Option<(u32, u32)> {
         if self.pos >= self.end {
             return None;
         }
-        let shared = format::read_varint(self.data, &mut self.pos)? as usize;
-        let suffix_len = format::read_varint(self.data, &mut self.pos)? as usize;
+        // 先取出切片引用，后续对 self.prev 的可变借用互不干扰
+        let data = self.data;
+        let shared = format::read_varint(data, &mut self.pos)? as usize;
+        let suffix_len = format::read_varint(data, &mut self.pos)? as usize;
         let suffix_end = self.pos.checked_add(suffix_len)?;
-        let suffix = std::str::from_utf8(self.data.get(self.pos..suffix_end)?).ok()?;
+        let suffix = std::str::from_utf8(data.get(self.pos..suffix_end)?).ok()?;
         self.pos = suffix_end;
 
-        let postings_len = format::read_varint(self.data, &mut self.pos)?;
-        let doc_freq = format::read_varint(self.data, &mut self.pos)?;
+        let postings_len = format::read_varint(data, &mut self.pos)?;
+        let doc_freq = format::read_varint(data, &mut self.pos)?;
 
         if shared > self.prev.len() || !self.prev.is_char_boundary(shared) {
             return None;
         }
-        let mut term = String::with_capacity(shared + suffix_len);
-        term.push_str(&self.prev[..shared]);
-        term.push_str(suffix);
-        self.prev = term.clone();
-        Some((term, postings_len, doc_freq))
+        self.prev.truncate(shared);
+        self.prev.push_str(suffix);
+        Some((postings_len, doc_freq))
+    }
+
+    fn term(&self) -> &str {
+        &self.prev
+    }
+}
+
+/// 文档集合的位图（`doc_count` 位）。
+///
+/// 为什么不用 `HashSet<u32>` / `Vec<u32>`：
+/// - 求交、求并是 `doc_count/64` 次字操作（本站 144 篇 = **3 个 u64**），与集合大小无关；
+/// - 位图天然去重且按 id 升序，省掉候选集的 `sort_unstable + dedup`；
+/// - 从 postings 直接置位，不需要「先解出 `Vec<u32>` 再合并」的中间分配。
+#[derive(Clone)]
+struct DocBits {
+    words: Vec<u64>,
+}
+
+impl DocBits {
+    fn new(doc_count: u32) -> Self {
+        Self {
+            words: vec![0u64; (doc_count as usize).div_ceil(64)],
+        }
+    }
+
+    /// 全集（doc_count 位全 1，末字多余的位保持 0）
+    fn full(doc_count: u32) -> Self {
+        let mut bits = Self::new(doc_count);
+        if doc_count == 0 {
+            return bits;
+        }
+        let last = bits.words.len() - 1;
+        for slot in bits.words[..last].iter_mut() {
+            *slot = u64::MAX;
+        }
+        let remainder = doc_count % 64;
+        bits.words[last] = if remainder == 0 {
+            u64::MAX
+        } else {
+            (1u64 << remainder) - 1
+        };
+        bits
+    }
+
+    #[inline]
+    fn insert(&mut self, id: u32) {
+        let (word, bit) = (id as usize / 64, id as usize % 64);
+        if let Some(slot) = self.words.get_mut(word) {
+            *slot |= 1u64 << bit;
+        }
+    }
+
+    #[inline]
+    fn and_assign(&mut self, other: &Self) {
+        for (slot, rhs) in self.words.iter_mut().zip(other.words.iter()) {
+            *slot &= *rhs;
+        }
+    }
+
+    #[inline]
+    fn or_assign(&mut self, other: &Self) {
+        for (slot, rhs) in self.words.iter_mut().zip(other.words.iter()) {
+            *slot |= *rhs;
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.words.iter().map(|slot| slot.count_ones() as usize).sum()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.iter().all(|slot| *slot == 0)
+    }
+
+    /// 按 id 升序迭代（与构建期的文档顺序一致，即日期降序）
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.words.iter().enumerate().flat_map(|(index, slot)| {
+            let base = (index * 64) as u32;
+            let mut bits = *slot;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let offset = bits.trailing_zeros();
+                bits &= bits - 1;
+                Some(base + offset)
+            })
+        })
     }
 }
 
@@ -268,13 +364,17 @@ impl Index {
         ))
     }
 
-    fn block_first_term(&self, block: u32) -> Option<String> {
+    /// 块内首词与 `term` 的比较结果。
+    ///
+    /// 二分查找只需要比较，不需要把首词**构造出来**——旧实现为此每个二分步都新建一个 String。
+    fn block_first_term_cmp(&self, block: u32, term: &str) -> Option<Ordering> {
         let (term_off, count, _) = self.block_entry(block)?;
         if count == 0 {
             return None;
         }
         let mut cursor = TermCursor::new(&self.data, self.terms_off, self.terms_len, term_off);
-        cursor.next().map(|(term, _, _)| term)
+        cursor.advance()?;
+        Some(cursor.term().cmp(term))
     }
 
     /// 二分找到「首词 <= term」的最大块号；若不存在（首词整体大于 term），退化为 0 号块。
@@ -286,8 +386,10 @@ impl Index {
         let mut found: Option<u32> = None;
         while lo <= hi {
             let mid = lo + (hi - lo) / 2;
-            let first_le =
-                matches!(self.block_first_term(mid), Some(first) if first.as_str() <= term);
+            let first_le = matches!(
+                self.block_first_term_cmp(mid, term),
+                Some(Ordering::Less | Ordering::Equal)
+            );
             if first_le {
                 found = Some(mid);
                 lo = mid + 1;
@@ -300,21 +402,26 @@ impl Index {
         Some(found.unwrap_or(0))
     }
 
-    fn postings_slice(&self, pos: usize, len: u32) -> &[u8] {
-        let end = pos.saturating_add(len as usize);
-        self.data.get(pos..end).unwrap_or(&[])
+    fn postings_slice(&self, pos: usize, len: u32) -> Option<&[u8]> {
+        let end = pos.checked_add(len as usize)?;
+        self.data.get(pos..end)
     }
 
-    fn decode_postings(&self, pos: usize, len: u32) -> Vec<u32> {
-        let bytes = self.postings_slice(pos, len);
-        let mut ids = Vec::new();
+    /// 把某个词条的 postings 直接解码进位图（delta + varint，升序）。
+    ///
+    /// 越界或截断时返回 false，调用方按「该词条无命中」处理——索引损坏时宁可少结果，
+    /// 也不能在 wasm 里 panic（`panic = "abort"` 会 trap 掉整个 worker）。
+    fn postings_into(&self, pos: usize, len: u32, out: &mut DocBits) -> bool {
+        let Some(bytes) = self.postings_slice(pos, len) else {
+            return false;
+        };
         let mut cursor = 0usize;
         let mut last = 0u32;
         while let Some(delta) = format::read_varint(bytes, &mut cursor) {
             last = last.saturating_add(delta);
-            ids.push(last);
+            out.insert(last);
         }
-        ids
+        true
     }
 
     /// 精确查词 → (postings 绝对偏移, postings 字节长度, doc_freq)
@@ -324,23 +431,23 @@ impl Index {
         let mut cursor = TermCursor::new(&self.data, self.terms_off, self.terms_len, term_off);
         let mut postings_pos = block_postings;
         for _ in 0..count {
-            let (current, postings_len, doc_freq) = cursor.next()?;
-            if current.as_str() == term {
-                return Some((postings_pos, postings_len, doc_freq));
+            let (postings_len, doc_freq) = cursor.advance()?;
+            match cursor.term().cmp(term) {
+                Ordering::Equal => return Some((postings_pos, postings_len, doc_freq)),
+                Ordering::Greater => return None,
+                Ordering::Less => {}
             }
-            if current.as_str() > term {
-                return None;
-            }
-            postings_pos += postings_len as usize;
+            postings_pos = postings_pos.checked_add(postings_len as usize)?;
         }
         None
     }
 
-    /// 前缀展开：所有以 `prefix` 开头的词条对应的 doc 集合（含精确命中的那个词条）。
-    fn prefix_postings(&self, prefix: &str, budget: &mut usize) -> Vec<Vec<u32>> {
-        let mut out = Vec::new();
+    /// 前缀展开：把「所有以 `prefix` 开头的词条」的 postings 并入 `out`。
+    ///
+    /// 精确命中的那个词条由 `exact_postings` 负责，这里跳过它以免重复解码。
+    fn prefix_postings(&self, prefix: &str, budget: &mut usize, out: &mut DocBits) {
         let Some(start_block) = self.locate_block(prefix) else {
-            return out;
+            return;
         };
         for block in start_block..self.block_count {
             let Some((first_term_off, count, block_postings)) = self.block_entry(block) else {
@@ -350,67 +457,79 @@ impl Index {
                 TermCursor::new(&self.data, self.terms_off, self.terms_len, first_term_off);
             let mut postings_pos = block_postings;
             for _ in 0..count {
-                let Some((term, postings_len, _)) = cursor.next() else {
+                let Some((postings_len, _)) = cursor.advance() else {
                     break;
                 };
                 let this_pos = postings_pos;
-                postings_pos += postings_len as usize;
+                let Some(next_pos) = postings_pos.checked_add(postings_len as usize) else {
+                    return;
+                };
+                postings_pos = next_pos;
 
-                if term.starts_with(prefix) {
-                    if *budget == 0 {
-                        return out;
+                let term = cursor.term();
+                if !term.starts_with(prefix) {
+                    // 词条有序：越过前缀区间即可整体收工
+                    if term > prefix {
+                        return;
                     }
-                    *budget -= 1;
-                    out.push(self.decode_postings(this_pos, postings_len));
-                } else if term.as_str() > prefix {
-                    // 词条有序：跨过前缀区间即可整体收工
-                    return out;
+                    continue;
                 }
+                // 与 prefix 等长的就是精确命中那条，已经在 out 里了
+                if term.len() == prefix.len() {
+                    continue;
+                }
+                if *budget == 0 {
+                    return;
+                }
+                *budget -= 1;
+                self.postings_into(this_pos, postings_len, out);
             }
         }
-        out
     }
 
     /// 一个 token 的候选文档集合。
     ///
-    /// - 精确命中直接使用
-    /// - 单字符 CJK token（索引里只有 bigram）与最后一个 token（自动补全语义）额外做前缀展开
-    fn token_docs(&self, token: &str, is_last: bool) -> Vec<u32> {
-        let mut ids = match self.exact_postings(token) {
-            Some((pos, len, _)) => self.decode_postings(pos, len),
-            None => Vec::new(),
-        };
+    /// - 精确命中先用
+    /// - 最后一个 token（自动补全语义）与单字符 CJK token（索引里只有 bigram）额外做前缀展开
+    fn token_docs(&self, token: &str, is_last: bool, out: &mut DocBits) {
+        if let Some((pos, len, _)) = self.exact_postings(token) {
+            self.postings_into(pos, len, out);
+        }
 
         let single_cjk = token.chars().count() == 1 && token.chars().all(is_cjk_like);
         if is_last || single_cjk {
             let mut budget = MAX_PREFIX_TERMS;
-            for extra in self.prefix_postings(token, &mut budget) {
-                ids.extend(extra);
-            }
-            ids.sort_unstable();
-            ids.dedup();
+            self.prefix_postings(token, &mut budget, out);
         }
-        ids
     }
 
-    /// 范围过滤：返回受限文档集合；两个都不给则 None（不限定）。
-    fn facet_docs(&self, tag: Option<&str>, category: Option<&str>) -> Option<Vec<u32>> {
-        let tag_ids = tag.map(|t| self.tags.get(&normalize(t)).cloned().unwrap_or_default());
-        let cat_ids = category.map(|c| {
-            self.categories
-                .get(&normalize(c))
-                .cloned()
-                .unwrap_or_default()
-        });
-        match (tag_ids, cat_ids) {
-            (None, None) => None,
-            (Some(ids), None) => Some(ids),
-            (None, Some(ids)) => Some(ids),
-            (Some(tag_ids), Some(cat_ids)) => {
-                let set: HashSet<u32> = cat_ids.into_iter().collect();
-                Some(tag_ids.into_iter().filter(|id| set.contains(id)).collect())
-            }
+    /// 分面 id 列表 → 位图
+    fn bits_of(&self, ids: &[u32]) -> DocBits {
+        let mut bits = DocBits::new(self.doc_count);
+        for &id in ids {
+            bits.insert(id);
         }
+        bits
+    }
+
+    /// 范围过滤：返回受限文档位图；两个都不给则 None（不限定）。
+    ///
+    /// 查不到的分面（改名/删文后的旧标签）返回**空**位图，语义与「该标签下没有文档」一致。
+    fn facet_docs(&self, tag: Option<&str>, category: Option<&str>) -> Option<DocBits> {
+        if tag.is_none() && category.is_none() {
+            return None;
+        }
+        // 分面名在构建期已归一化；查询值大多也已是归一化形态，normalize_cow 免去分配
+        let mut bits = DocBits::full(self.doc_count);
+        if let Some(name) = tag {
+            let ids = self.tags.get(normalize_cow(name).as_ref());
+            bits.and_assign(&self.bits_of(ids.map_or(&[][..], |v| v.as_slice())));
+        }
+        if let Some(name) = category {
+            let ids = self.categories.get(normalize_cow(name).as_ref());
+            bits.and_assign(&self.bits_of(ids.map_or(&[][..], |v| v.as_slice())));
+        }
+        Some(bits)
     }
 
     // ---- 查询 --------------------------------------------------------------
@@ -428,69 +547,64 @@ impl Index {
         } else {
             limit.min(SEARCH_LIMIT_MAX)
         };
-        let query_text = normalize(keywords).trim().to_string();
+        let normalized_query = normalize(keywords);
+        let query_text = normalized_query.trim();
         let scope = self.facet_docs(tag, category);
 
         // 只限定范围、没有关键词：按文档原序（构建期已按日期降序）返回，摘要留空
         if query_text.is_empty() {
-            let Some(ids) = scope else {
+            let Some(scope) = scope else {
                 return Vec::new();
             };
-            return ids
+            return scope
                 .iter()
                 .take(limit)
-                .filter_map(|&id| self.build_hit(id, None, 0, false))
+                .filter_map(|id| self.build_hit(id, None, 0, false))
                 .collect();
         }
 
-        let tokens = dedup_preserve_order(tokenize(&query_text));
+        let tokens = dedup_preserve_order(tokenize(query_text));
         if tokens.is_empty() {
             return Vec::new();
         }
-        let scope_set: Option<HashSet<u32>> = scope.map(|ids| ids.into_iter().collect());
 
-        // 每个 token 的候选集（已按范围过滤）
-        let mut sets: Vec<Vec<u32>> = Vec::new();
+        // 每个 token 的候选位图（已按范围过滤）
+        let mut sets: Vec<DocBits> = Vec::new();
         for (i, token) in tokens.iter().enumerate() {
             let is_last = i + 1 == tokens.len();
-            let mut ids = self.token_docs(token, is_last);
-            if let Some(set) = &scope_set {
-                ids.retain(|id| set.contains(id));
+            let mut bits = DocBits::new(self.doc_count);
+            self.token_docs(token, is_last, &mut bits);
+            if let Some(scope) = &scope {
+                bits.and_assign(scope);
             }
-            if !ids.is_empty() {
-                sets.push(ids);
+            if !bits.is_empty() {
+                sets.push(bits);
             }
         }
         if sets.is_empty() {
             return Vec::new();
         }
 
-        // 先试 AND（所有 token 都命中）；为空则退化为 OR，按命中 token 数排序
-        let mut candidates: Vec<u32> = Vec::new();
+        // 先试 AND（所有 token 都命中）；为空则退化为 OR，由打分阶段按命中 token 数排序
+        let mut candidates = DocBits::new(self.doc_count);
         if sets.len() == tokens.len() {
-            let mut acc = sets[0].clone();
+            candidates = sets[0].clone();
             for set in &sets[1..] {
-                let lookup: HashSet<u32> = set.iter().copied().collect();
-                acc.retain(|id| lookup.contains(id));
-                if acc.is_empty() {
+                candidates.and_assign(set);
+                if candidates.is_empty() {
                     break;
                 }
             }
-            candidates = acc;
         }
         if candidates.is_empty() {
-            let mut union: HashSet<u32> = HashSet::new();
             for set in &sets {
-                for &id in set {
-                    union.insert(id);
-                    if union.len() >= MAX_CANDIDATES {
-                        break;
-                    }
+                candidates.or_assign(set);
+                // 上限实际生效：旧实现在内层 break，外层仍会继续并集
+                if candidates.count() >= MAX_CANDIDATES {
+                    break;
                 }
             }
-            candidates = union.into_iter().collect();
         }
-        candidates.sort_unstable();
 
         // 打分：字段命中权重（字段级判断用原文 `contains`，候选集只有几十个，成本可忽略）
         let mut scored: Vec<(
@@ -498,15 +612,16 @@ impl Index {
             u32,  /*score*/
             u32,  /*doc_id*/
             bool, /*exact*/
-        )> = Vec::with_capacity(candidates.len());
-        for id in candidates {
+        )> = Vec::with_capacity(candidates.count());
+        for id in candidates.iter() {
             let Some(view) = self.doc(id) else {
                 continue;
             };
-            let n_title = normalize(view.title);
-            let n_tags = normalize(view.tags);
-            let n_cats = normalize(view.categories);
-            let n_text = normalize(view.text);
+            // 借用版归一化：语料本来无需改写时不分配（旧实现在这里为每个候选复制四份文本）
+            let n_title = normalize_cow(view.title);
+            let n_tags = normalize_cow(view.tags);
+            let n_cats = normalize_cow(view.categories);
+            let n_text = normalize_cow(view.text);
 
             let mut matched = 0u32;
             let mut score = 0u32;
@@ -532,10 +647,10 @@ impl Index {
                     matched += 1;
                 }
             }
-            let exact = n_title.contains(&query_text)
-                || n_text.contains(&query_text)
-                || n_tags.contains(&query_text)
-                || n_cats.contains(&query_text);
+            let exact = n_title.contains(query_text)
+                || n_text.contains(query_text)
+                || n_tags.contains(query_text)
+                || n_cats.contains(query_text);
             if exact {
                 score += BONUS_EXACT;
             }
@@ -543,18 +658,21 @@ impl Index {
         }
 
         // 命中 token 多者优先 → 分数高者优先 → 文档原序（日期降序）
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+        let by_rank = |a: &(u32, u32, u32, bool), b: &(u32, u32, u32, bool)| {
+            b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2))
+        };
+        // 只要前 limit 条：先 O(n) 选择再对入选者排序（原实现是全量 O(n log n)）
+        if scored.len() > limit {
+            scored.select_nth_unstable_by(limit, by_rank);
+            scored.truncate(limit);
+        }
+        scored.sort_by(by_rank);
 
         let first_token = tokens.first().map(String::as_str).unwrap_or("");
         scored
             .into_iter()
-            .take(limit)
             .filter_map(|(_, score, id, exact)| {
-                let needle = if exact {
-                    query_text.as_str()
-                } else {
-                    first_token
-                };
+                let needle = if exact { query_text } else { first_token };
                 self.build_hit(id, Some(needle), score, exact)
             })
             .collect()
@@ -569,7 +687,7 @@ impl Index {
     ) -> Option<SearchHit> {
         let view = self.doc(id)?;
         let snippet = needle
-            .map(|n| build_snippet(view.text, n))
+            .map(|needle| build_snippet(view.text, needle))
             .unwrap_or_default();
         Some(SearchHit {
             path: view.path.to_string(),
@@ -584,29 +702,47 @@ impl Index {
     }
 }
 
-/// 摘要：在归一化文本里定位 needle，再把「字符下标」映射回原文切窗口。
+/// 摘要：在正文里定位 needle，再把「字符下标」映射回原文切窗口。
 ///
 /// 成立的前提是 `normalize` 逐字符 1:1（不增删字符），见 `tokenize::normalize` 的说明。
+///
+/// 性能要点（每条命中都会跑，命中多时是查询的主要开销）：
+/// 1. **原文优先**：needle 直接出现在原文里就不再归一化（纯中文语料几乎总成立），
+///    省掉一次「是否需要改写」的全串扫描 + 一次分配；
+/// 2. 只用一趟 `chars()` 迭代取窗口，并用「迭代器还有没有下一个」判断要不要加尾省略号，
+///    不再先 `chars().count()` 数一遍总长（旧实现每条命中要 4 趟字符遍历）。
 fn build_snippet(original: &str, needle: &str) -> String {
-    let total_chars = original.chars().count();
-    if needle.is_empty() || total_chars == 0 {
+    if needle.is_empty() || original.is_empty() {
         return head_of(original, SNIPPET_HEAD_CHARS);
     }
-    let normalized = normalize(original);
-    let Some(byte_idx) = normalized.find(needle) else {
-        return head_of(original, SNIPPET_HEAD_CHARS);
-    };
-    let hit_char_idx = normalized[..byte_idx].chars().count();
-    let needle_chars = needle.chars().count();
 
+    // 慢路径的归一化结果需要活得比 haystack 借用更久，故在此提前声明
+    let normalized;
+    let (haystack, byte_idx) = match original.find(needle) {
+        Some(idx) => (original, idx),
+        None => {
+            normalized = normalize(original);
+            match normalized.find(needle) {
+                Some(idx) => (normalized.as_str(), idx),
+                None => return head_of(original, SNIPPET_HEAD_CHARS),
+            }
+        }
+    };
+
+    let hit_char_idx = haystack[..byte_idx].chars().count();
+    let needle_chars = needle.chars().count();
     let start = hit_char_idx.saturating_sub(SNIPPET_WINDOW_CHARS);
-    let end = (hit_char_idx + needle_chars + SNIPPET_WINDOW_CHARS).min(total_chars);
-    let body: String = original.chars().skip(start).take(end - start).collect();
+    let want = hit_char_idx + needle_chars + SNIPPET_WINDOW_CHARS - start;
+
+    let mut chars = original.chars();
+    let body: String = chars.by_ref().skip(start).take(want).collect();
+    let more_after = chars.next().is_some();
+
     format!(
         "{}{}{}",
         if start > 0 { "…" } else { "" },
         body,
-        if end < total_chars { "…" } else { "" }
+        if more_after { "…" } else { "" }
     )
 }
 

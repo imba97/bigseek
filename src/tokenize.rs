@@ -13,6 +13,8 @@
 //! 而本站语料里真正出现的等价形式只有全角 ASCII、全角空格和英文大小写。若日后需要
 //! （繁体、组合字符），在 `normalize` 里补一张映射表即可，格式版本号 +1。
 
+use std::borrow::Cow;
+
 /// 归一化：逐字符 1:1 替换，输出与输入**字符数相同**。
 ///
 /// - `U+3000`（全角空格）→ `' '`
@@ -21,15 +23,38 @@
 pub fn normalize(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
-        let mapped = match ch {
-            '\u{3000}' => ' ',
-            '\u{FF01}'..='\u{FF5E}' => char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch),
-            'A'..='Z' => ch.to_ascii_lowercase(),
-            other => other,
-        };
-        out.push(mapped);
+        out.push(map_char(ch));
     }
     out
+}
+
+/// 会被 `normalize` 改写的字符判定。纯中文/已小写 ASCII 语料里几乎恒为 false。
+#[inline]
+fn needs_rewrite(ch: char) -> bool {
+    matches!(ch, '\u{3000}' | '\u{FF01}'..='\u{FF5E}' | 'A'..='Z')
+}
+
+#[inline]
+fn map_char(ch: char) -> char {
+    match ch {
+        '\u{3000}' => ' ',
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch),
+        'A'..='Z' => ch.to_ascii_lowercase(),
+        other => other,
+    }
+}
+
+/// 归一化的借用版：**无需改写时直接返回入参**，不改写就不分配。
+///
+/// 查询热路径专用：打分阶段每个候选都要归一化标题/标签/分类/正文，
+/// 而这四份文本绝大多数本来就已经是归一化形态（纯中文、小写英文），
+/// 无条件 `String` 复制等于每次击键把整份候选语料再抄一遍。
+pub fn normalize_cow(input: &str) -> Cow<'_, str> {
+    if input.chars().any(needs_rewrite) {
+        Cow::Owned(normalize(input))
+    } else {
+        Cow::Borrowed(input)
+    }
 }
 
 /// 无空格分词文字（CJK 表意文字、假名、谚文音节）：这些字符参与 bigram 切分。
