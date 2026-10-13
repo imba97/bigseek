@@ -18,6 +18,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use blog_search::build::{build_index, SearchDocument};
+use blog_search::posts::load_posts;
 use blog_search::tokenize::{is_cjk_like, normalize};
 use blog_search::{load_index, SEARCH_LIMIT_MAX};
 
@@ -47,17 +48,21 @@ struct JsonRecord {
 }
 
 struct Args {
-    input: PathBuf,
+    /// 直接从文章目录读取（推荐）
+    posts_dir: Option<PathBuf>,
+    /// 读取博客 TS 侧产出的 search-full.json（回归基准 / 兼容旧流程）
+    input: Option<PathBuf>,
     output: PathBuf,
     quiet: bool,
     verify: bool,
 }
 
 fn usage() -> &'static str {
-    "用法: build-index --input <search-full.json> --output <search.idx> [--verify] [--quiet]"
+    "用法: build-index (--posts-dir <posts/> | --input <search-full.json>) --output <search.idx> [--verify] [--quiet]"
 }
 
 fn parse_args() -> Result<Args, String> {
+    let mut posts_dir: Option<PathBuf> = None;
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut quiet = false;
@@ -65,6 +70,7 @@ fn parse_args() -> Result<Args, String> {
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
+            "--posts-dir" => posts_dir = argv.next().map(PathBuf::from),
             "--input" | "-i" => input = argv.next().map(PathBuf::from),
             "--output" | "-o" => output = argv.next().map(PathBuf::from),
             "--quiet" | "-q" => quiet = true,
@@ -73,8 +79,16 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("未知参数：{other}\n{}", usage())),
         }
     }
+    match (&posts_dir, &input) {
+        (Some(_), Some(_)) => {
+            return Err(format!("--posts-dir 与 --input 只能给一个\n{}", usage()))
+        }
+        (None, None) => return Err(format!("必须给 --posts-dir 或 --input\n{}", usage())),
+        _ => {}
+    }
     Ok(Args {
-        input: input.ok_or_else(|| format!("缺少 --input\n{}", usage()))?,
+        posts_dir,
+        input,
         output: output.ok_or_else(|| format!("缺少 --output\n{}", usage()))?,
         quiet,
         verify,
@@ -95,25 +109,41 @@ fn run() -> Result<(), String> {
     let args = parse_args()?;
     let started = Instant::now();
 
-    let raw = std::fs::read_to_string(&args.input)
-        .map_err(|e| format!("读取 {} 失败：{e}", args.input.display()))?;
-    let records: Vec<JsonRecord> = serde_json::from_str(&raw)
-        .map_err(|e| format!("解析 {} 失败：{e}", args.input.display()))?;
-    if records.is_empty() {
-        return Err(format!("{} 里没有任何文档", args.input.display()));
-    }
-
-    let docs: Vec<SearchDocument> = records
-        .into_iter()
-        .map(|r| SearchDocument {
-            path: r.path,
-            title: r.title,
-            date: r.date,
-            tags: r.tags,
-            categories: r.categories,
-            text: r.text,
-        })
-        .collect();
+    let (docs, source_label) = if let Some(posts_dir) = &args.posts_dir {
+        let (docs, report) = load_posts(posts_dir)?;
+        if !args.quiet {
+            println!(
+                "[build-index] 扫描 {}：{}",
+                posts_dir.display(),
+                report.summary()
+            );
+        }
+        if docs.is_empty() {
+            return Err(format!("{} 下没有可发布的文章", posts_dir.display()));
+        }
+        (docs, format!("{}/（直读文章）", posts_dir.display()))
+    } else {
+        let input = args.input.as_ref().expect("parse_args 已保证二者必有其一");
+        let raw = std::fs::read_to_string(input)
+            .map_err(|e| format!("读取 {} 失败：{e}", input.display()))?;
+        let records: Vec<JsonRecord> = serde_json::from_str(&raw)
+            .map_err(|e| format!("解析 {} 失败：{e}", input.display()))?;
+        if records.is_empty() {
+            return Err(format!("{} 里没有任何文档", input.display()));
+        }
+        let docs = records
+            .into_iter()
+            .map(|r| SearchDocument {
+                path: r.path,
+                title: r.title,
+                date: r.date,
+                tags: r.tags,
+                categories: r.categories,
+                text: r.text,
+            })
+            .collect();
+        (docs, format!("{}（JSON 输入）", input.display()))
+    };
 
     let (bytes, stats) = build_index(&docs);
     if let Some(parent) = args.output.parent() {
@@ -127,8 +157,7 @@ fn run() -> Result<(), String> {
 
     if !args.quiet {
         println!(
-            "[build-index] {} → {}（{}）耗时 {} ms",
-            args.input.display(),
+            "[build-index] {source_label} → {}（{}）耗时 {} ms",
             args.output.display(),
             stats.summary(),
             started.elapsed().as_millis()

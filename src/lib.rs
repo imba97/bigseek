@@ -44,6 +44,9 @@ pub mod format;
 pub mod query;
 pub mod tokenize;
 
+#[cfg(feature = "cli")]
+pub mod posts;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 

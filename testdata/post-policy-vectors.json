@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "note": "发布规则向量：Rust（posts::evaluate_frontmatter）与博客 TS（post-policy.ts + @11ty/gray-matter）读同一份文件。任何一侧擅自改动规则都会红灯。",
+  "cases": [
+    {
+      "name": "常规文章：键齐全、块序列标签",
+      "frontmatter": "id: 119\ntitle: 请求接口类的封装\ndate: 2026-01-01 10:20:30\ntags:\n  - TypeScript\n  - 封装\ncategories:\n  - 前端",
+      "expected": {
+        "publishable": true,
+        "id": "119",
+        "path": "/post/119",
+        "title": "请求接口类的封装",
+        "date": "2026-01-01 10:20:30",
+        "tags": ["TypeScript", "封装"],
+        "categories": ["前端"]
+      }
+    },
+    {
+      "name": "行内数组标签 + 无 categories",
+      "frontmatter": "id: 7\ntitle: 短标题\ndate: 2020-07-19 19:51:51\ntags: [a, bb]",
+      "expected": {
+        "publishable": true,
+        "id": "7",
+        "path": "/post/7",
+        "title": "短标题",
+        "date": "2020-07-19 19:51:51",
+        "tags": ["a", "bb"],
+        "categories": []
+      }
+    },
+    {
+      "name": "draft: true → 不发布",
+      "frontmatter": "id: 8\ntitle: 草稿\ndate: 2026-01-01\ndraft: true",
+      "expected": { "publishable": false, "reject_reason": "Draft" }
+    },
+    {
+      "name": "draft: false → 发布",
+      "frontmatter": "id: 9\ntitle: 非草稿\ndate: 2026-01-01\ndraft: false",
+      "expected": {
+        "publishable": true,
+        "id": "9",
+        "path": "/post/9",
+        "title": "非草稿",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "draft: \"false\"（字符串）是 JS 真值 → 不发布",
+      "frontmatter": "id: 10\ntitle: 字符串草稿\ndate: 2026-01-01\ndraft: \"false\"",
+      "expected": { "publishable": false, "reject_reason": "Draft" }
+    },
+    {
+      "name": "缺 date → 不发布",
+      "frontmatter": "id: 11\ntitle: 无日期",
+      "expected": { "publishable": false, "reject_reason": "NoDate" }
+    },
+    {
+      "name": "date 为空串 → 不发布",
+      "frontmatter": "id: 12\ntitle: 空日期\ndate: \"\"",
+      "expected": { "publishable": false, "reject_reason": "NoDate" }
+    },
+    {
+      "name": "date 为 null → 不发布",
+      "frontmatter": "id: 13\ntitle: 空日期\ndate:",
+      "expected": { "publishable": false, "reject_reason": "NoDate" }
+    },
+    {
+      "name": "id 非数字 → 不发布",
+      "frontmatter": "id: abc\ntitle: 非数字 id\ndate: 2026-01-01",
+      "expected": { "publishable": false, "reject_reason": "BadId" }
+    },
+    {
+      "name": "缺 id → 不发布",
+      "frontmatter": "title: 无 id\ndate: 2026-01-01",
+      "expected": { "publishable": false, "reject_reason": "BadId" }
+    },
+    {
+      "name": "id 是带引号的数字字符串 → 发布",
+      "frontmatter": "id: \"123\"\ntitle: 字符串 id\ndate: 2026-01-01",
+      "expected": {
+        "publishable": true,
+        "id": "123",
+        "path": "/post/123",
+        "title": "字符串 id",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "id 带空白 → trim 后发布",
+      "frontmatter": "id: \" 7 \"\ntitle: 空白 id\ndate: 2026-01-01",
+      "expected": {
+        "publishable": true,
+        "id": "7",
+        "path": "/post/7",
+        "title": "空白 id",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "id 是浮点 7.0 → JS String() 得 \"7\"",
+      "frontmatter": "id: 7.0\ntitle: 浮点 id\ndate: 2026-01-01",
+      "expected": {
+        "publishable": true,
+        "id": "7",
+        "path": "/post/7",
+        "title": "浮点 id",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "缺 title → 空串",
+      "frontmatter": "id: 14\ndate: 2026-01-01",
+      "expected": {
+        "publishable": true,
+        "id": "14",
+        "path": "/post/14",
+        "title": "",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "title 是数字 → 转成字符串",
+      "frontmatter": "id: 15\ntitle: 2026\ndate: 2026-01-01",
+      "expected": {
+        "publishable": true,
+        "id": "15",
+        "path": "/post/15",
+        "title": "2026",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "tags 是单个标量 → 包成单元素数组",
+      "frontmatter": "id: 16\ntitle: 标量标签\ndate: 2026-01-01\ntags: vue",
+      "expected": {
+        "publishable": true,
+        "id": "16",
+        "path": "/post/16",
+        "title": "标量标签",
+        "date": "2026-01-01",
+        "tags": ["vue"],
+        "categories": []
+      }
+    },
+    {
+      "name": "tags 为 null → 空数组",
+      "frontmatter": "id: 17\ntitle: 空标签\ndate: 2026-01-01\ntags:\ncategories:",
+      "expected": {
+        "publishable": true,
+        "id": "17",
+        "path": "/post/17",
+        "title": "空标签",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "标签元素 trim 后丢弃空串",
+      "frontmatter": "id: 18\ntitle: 脏标签\ndate: 2026-01-01\ntags: [\"  a  \", \"\", \"   \", b]",
+      "expected": {
+        "publishable": true,
+        "id": "18",
+        "path": "/post/18",
+        "title": "脏标签",
+        "date": "2026-01-01",
+        "tags": ["a", "b"],
+        "categories": []
+      }
+    },
+    {
+      "name": "date 带空白 → trim",
+      "frontmatter": "id: 19\ntitle: 空白日期\ndate: \" 2026-01-01 \"",
+      "expected": {
+        "publishable": true,
+        "id": "19",
+        "path": "/post/19",
+        "title": "空白日期",
+        "date": "2026-01-01",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "date 是数字 → JS String() 后作为日期字符串",
+      "frontmatter": "id: 20\ntitle: 数字日期\ndate: 20260101",
+      "expected": {
+        "publishable": true,
+        "id": "20",
+        "path": "/post/20",
+        "title": "数字日期",
+        "date": "20260101",
+        "tags": [],
+        "categories": []
+      }
+    },
+    {
+      "name": "空 frontmatter → 不发布（先卡 date）",
+      "frontmatter": "",
+      "expected": { "publishable": false, "reject_reason": "NoDate" }
+    }
+  ]
+}

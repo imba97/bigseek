@@ -64,13 +64,37 @@ facets        varint 计数 + (名称, doc id 列表)
 
 ### 构建期（native CLI）
 
+两种输入方式，二选一：
+
 ```bash
-# 输入是博客 TS 侧产出的 search-full.json（文档抽取的唯一真源仍在博客仓库）
+# A) 直读文章目录（推荐）——Rust 自己扫 posts/**/index.md、解析 frontmatter、按发布规则过滤、markdown 转纯文本
+cargo run --release --features cli --bin build-index -- \
+  --posts-dir ../imba97-blog-vite/posts \
+  --output ../imba97-blog-vite/public/search/search.idx \
+  --verify
+
+# B) 读博客 TS 侧产出的 search-full.json（回归基准 / 兼容旧流程）
 cargo run --release --features cli --bin build-index -- \
   --input ../imba97-blog-vite/public/search-full.json \
   --output ../imba97-blog-vite/public/search/search.idx \
   --verify
 ```
+
+两条路径在真实语料上产出**字节级完全相同**的索引（实测 144 篇、SHA256 一致），
+由 `tests/direct_read_parity.rs` 持续对拍。
+
+直读模式的取舍：
+
+| | 直读 `--posts-dir` | 读 `--input` JSON |
+| --- | --- | --- |
+| 发布规则真源 | Rust 复刻（由共享向量锁定） | TS `post-policy.ts` |
+| 构建期依赖 | 无（Rust 读文件系统） | 必须先跑一遍 TS 抽文 |
+| 索引内容上限 | 可扩到标题层级/代码语言/原文偏移 | 被 `stripHtml` 拍平后固定 |
+| 回归基准 | — | 仍是差分测试的基准 |
+
+> ⚠️ 直读模式要求 Rust 侧与 TS 侧的抽取规则一致。**别只靠文档约束**：
+> `testdata/post-policy-vectors.json` 锁规则、`tests/direct_read_parity.rs` 对拍真实语料、
+> 博客构建里还有一道「两条路径产出索引哈希必须相同」的门禁（见下）。
 
 `--verify` 会在写完索引后立刻加载它，自动从语料抽样 ≥40 个中文词（取跨文档重复出现的 2 字 CJK 串，
 真实词会复现、跨词边界的碎片一般不会），做**文档级召回**自检，低于 95% 直接非 0 退出。
@@ -102,7 +126,7 @@ index.query('性能优化', null, null, 40)
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --features cli -- -D warnings
-cargo test --features cli
+cargo test --features cli                     # 含发布规则向量、fixture 直读、往返查询
 
 # wasm 冒烟（真实 JS 运行时跑一遍查询）
 wasm-pack build --target web --release --out-dir pkg --features wasm
@@ -113,21 +137,58 @@ node scripts/smoke-wasm.mjs target/smoke.idx
 # 性能基准
 node scripts/bench-wasm.mjs target/search.idx
 
-# 真实语料召回回归（opt-in，需要博客仓库的产物）
+# 真实语料的差分对拍（opt-in，需要博客仓库）
+BLOG_POSTS_DIR=../imba97-blog-vite/posts \
+BLOG_SEARCH_DOCS=../imba97-blog-vite/public/search-full.json \
+cargo test --features cli --test direct_read_parity -- --nocapture
+
+# 真实语料召回回归（opt-in）
 BLOG_SEARCH_DOCS=../imba97-blog-vite/public/search-full.json \
 BLOG_SEARCH_INDEX=../imba97-blog-vite/public/search/search.idx \
-cargo test --release --test real_corpus -- --nocapture
+cargo test --features cli --test real_corpus -- --nocapture
 ```
 
-## 分词一致性契约
+> `cargo test` **不要加 `--release`**：`[profile.release]` 里为了 wasm 体积设了 `panic = "abort"`，
+> 它与测试目标要求的 unwind 不兼容。两个 opt-in 测试在 debug 下跑 144 篇也只要 0.2 s。
 
-`testdata/tokenize-vectors.json` 是**跨语言**的分词向量，Rust 侧由 `tests/tokenize_vectors.rs` 校验，
-博客 TS 侧由 `pnpm run search:check-parity` 校验同一份文件。任何一侧擅自改动分词语义都会红灯。
+### 本机网络提示
+
+如果 cargo 拉不到新依赖（企业代理 / 镜像环境），用环境变量让它走代理即可，不需要改全局配置：
+
+```bash
+# PowerShell
+$env:HTTPS_PROXY='http://127.0.0.1:7897'; cargo fetch
+# bash
+HTTPS_PROXY=http://127.0.0.1:7897 cargo fetch
+```
+
+## 分词与发布规则的一致性契约
+
+两份向量文件是**跨语言契约**，Rust 与博客 TS 侧读同一份：
+
+| 文件 | 锁定的语义 | Rust 校验 | 博客 TS 校验 |
+| --- | --- | --- | --- |
+| `testdata/tokenize-vectors.json` | 归一化 + 分词（bigram 边界、全角、大小写、单字、假名） | `tests/tokenize_vectors.rs` | `pnpm run search:check-parity` |
+| `testdata/post-policy-vectors.json` | 发布规则（draft 真值、date 判空、id 数字、标签归一化） | `tests/post_policy_vectors.rs` | `pnpm run search:check-parity` |
+
+规则向量里刻意放了几个「JS 语义陷阱」用例，它们是最容易静默漂移的地方：
+
+- `draft: "false"`（字符串）在 JS 里是**真值** → 文章不可发布
+- `id: 7.0` → JS `String()` 得 `"7"`，不是 `"7.0"`
+- `tags: ["  a  ", "", "   ", b]` → trim 后丢弃空串，得 `["a","b"]`
+- `id: abc` / 缺 `date` / `date: ""` → 分别对应三种拒绝原因
 
 归一化刻意只做**逐字符 1:1 替换**（全角 ASCII → 半角、`U+3000` → 空格、ASCII 大写 → 小写），不做完整 NFKC：
 一是省掉 unicode-normalization 的表体积，二是「归一化文本的字符下标 == 原文的字符下标」，
 摘要（snippet）可以直接把命中位置映射回原文，不需要额外位置表。若日后要支持繁体/组合字符，
 在 `normalize` 里补映射表并把 `FORMAT_VERSION` +1 即可。
+
+### markdown 抽取的一个坑（实测踩过）
+
+博客用的 `markdown-it` 是**默认 preset**，它自带 **table 与 strikethrough**（不是 CommonMark）。
+comrak 默认不开这两项，第一版移植因此有 4 篇文章文本不一致（表格管道符、`~~删除线~~`）。
+现在 `posts.rs` 里显式打开 table/strikethrough、关闭 tasklist/tagfilter/footnotes 等 markdown-it 没有的扩展，
+并由 `tests/direct_read_parity.rs` 守住。
 
 ## 目录
 
@@ -136,11 +197,16 @@ src/tokenize.rs        归一化 + bigram 分词（两端共用）
 src/format.rs          格式常量、varint、头部字段偏移
 src/build.rs           索引构建（BTreeMap 倒排 → 前端编码词典 → 各段拼装）
 src/query.rs           索引加载 + 检索（块二分 → 候选 → 校验 → 打分 → 摘要）
+src/posts.rs           直读文章（frontmatter/YAML → 发布规则 → markdown 转纯文本），仅 cli feature
 src/wasm.rs            wasm-bindgen 边界（手工拼 js_sys 对象，不引 serde）
-src/bin/build-index.rs 构建期 CLI + 召回自检
-tests/                 分词向量、往返查询、真实语料召回（opt-in）
+src/bin/build-index.rs 构建期 CLI（--posts-dir / --input）+ 召回自检
+testdata/              跨语言契约向量（分词、发布规则）
+tests/                 向量回归、fixture 直读、往返查询、真实语料对拍/召回（后两者 opt-in）
 scripts/               冒烟与基准（仅依赖 Node 内置能力）
 ```
+
+**依赖隔离**：`cli` 与 `wasm` 是互不依赖的 feature。`comrak` / `serde_yaml_ng` / `regex` 只进 native CLI，
+wasm 产物不会因为直读文章而变大（实测 `blog_search_bg.wasm` 恒为 75.4 KiB）。
 
 ## 已知取舍
 

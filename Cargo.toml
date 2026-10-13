@@ -2,7 +2,7 @@
 name = "blog-search"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.82"
 description = "Standalone full-text search index for the imba97 blog: compact binary format, CJK bigram tokenizer, native builder + WebAssembly runtime"
 license = "MIT"
 repository = "https://github.com/imba97/imba97-blog-search"
@@ -17,14 +17,19 @@ crate-type = ["cdylib", "rlib"]
 default = []
 # WebAssembly 运行期绑定（wasm-pack build --features wasm）
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
-# 构建期 CLI：读 search-full.json 产出 search.idx
-cli = ["dep:serde", "dep:serde_json"]
+# 构建期 CLI：读 search-full.json 或直接读 posts/ 产出 search.idx。
+# markdown 解析（comrak）与 YAML 解析只进这个 feature，**不会进 wasm 产物**。
+cli = ["dep:serde", "dep:serde_json", "dep:comrak", "dep:serde_yaml_ng", "dep:regex"]
 
 [dependencies]
 wasm-bindgen = { version = "0.2.100", optional = true }
 js-sys = { version = "0.3", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
+# 刻意关掉默认特性：default 会带上 cli + syntect（syntect 又拉 onig，C 依赖）
+comrak = { version = "0.52", optional = true, default-features = false }
+serde_yaml_ng = { version = "0.10", optional = true }
+regex = { version = "1", optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
